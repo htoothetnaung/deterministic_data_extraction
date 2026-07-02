@@ -1,33 +1,25 @@
 import type { Metadata } from "next";
-import { Geist, Geist_Mono } from "next/font/google";
 import "./globals.css";
 import { Toaster } from "@/components/ui/toaster";
 import { Toaster as SonnerToaster } from "@/components/ui/sonner";
 import { Providers } from "@/components/providers";
 
-const geistSans = Geist({
-  variable: "--font-geist-sans",
-  subsets: ["latin"],
-});
-
-const geistMono = Geist_Mono({
-  variable: "--font-geist-mono",
-  subsets: ["latin"],
-});
-
 export const metadata: Metadata = {
-  title: "ExtractIQ — Deterministic Document Extraction",
+  title: "Atenxion - Deterministic Document Extraction",
   description:
-    "Benchmark, test, and prepare deterministic AI data extraction workflows from uploaded documents.",
+    "Parse documents, inspect parser evidence, and run schema-based deterministic data extraction.",
   keywords: [
     "document extraction",
-    "OCR",
-    "benchmarking",
-    "AI",
-    "enterprise",
-    "ExtractIQ",
+    "document parsing",
+    "deterministic extraction",
+    "schema extraction",
+    "Atenxion",
   ],
-  authors: [{ name: "ExtractIQ" }],
+  authors: [{ name: "Atenxion" }],
+  icons: {
+    icon: "/atenxion_logo.png",
+    apple: "/atenxion_logo.png",
+  },
 };
 
 export default function RootLayout({
@@ -38,7 +30,7 @@ export default function RootLayout({
   return (
     <html lang="en" suppressHydrationWarning>
       <body
-        className={`${geistSans.variable} ${geistMono.variable} antialiased bg-background text-foreground`}
+        className="antialiased bg-background text-foreground"
       >
         <Providers>{children}</Providers>
         <Toaster />

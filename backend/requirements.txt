@@ -1,5 +1,64 @@
-fastapi==0.128.0
+﻿fastapi==0.128.0
 uvicorn[standard]==0.44.0
 pydantic==2.12.5
 pydantic-settings==2.13.1
 python-multipart==0.0.24
+certifi
+
+# Database
+sqlalchemy[asyncio]>=2.0.0
+asyncpg
+alembic
+pgvector
+
+# Embeddings
+sentence-transformers==3.3.1
+google-genai>=1.0
+google-adk>=1.0
+# OpenAI: primary embeddings (text-embedding-3-small) + LLM field extraction
+openai>=1.0
+python-dotenv
+
+# Notebook parser benchmark dependencies
+pandas
+ipython
+tabulate
+pillow
+pypdf
+pdfplumber
+pymupdf
+docling
+unstructured[pdf]
+
+# Optional PDF-Extract-Kit parser adapter:
+# Clone https://github.com/opendatalab/PDF-Extract-Kit separately, install that
+# repo's requirements-cpu.txt or requirements.txt in its own Python env, download
+# opendatalab/pdf-extract-kit-1.0 model weights, then set:
+# EXTRACT_PDF_EXTRACT_KIT_REPO=<local PDF-Extract-Kit checkout>
+# EXTRACT_PDF_EXTRACT_KIT_PYTHON=<python executable for that env>
+
+# Optional DocLayout-YOLO routed parser demo:
+# Install doclayout-yolo or ultralytics in the brillar env, then set:
+# EXTRACT_DOCLAYOUT_YOLO_MODEL_PATH=<local doclayout-yolo model file>
+
+# Optional Mistral OCR parser adapter:
+# No extra Python package is required; the backend calls Mistral's documented
+# REST OCR endpoint directly. Set either env var:
+# MISTRAL_API_KEY=<your key>
+# EXTRACT_MISTRAL_API_KEY=<your key>
+
+# Optional PaddleOCR parser adapters:
+# Local OCR: install a PaddlePaddle build appropriate for your CPU/GPU first,
+# then install paddleocr. For CPU quick tests this is usually:
+#   pip install paddlepaddle paddleocr
+# For GPU, install the CUDA-matched paddlepaddle-gpu build first, then set:
+#   EXTRACT_PADDLEOCR_USE_GPU=true
+# Optional explicit device override:
+#   EXTRACT_PADDLEOCR_DEVICE=gpu:0
+# PaddleOCR-VL API: install langchain-paddleocr and configure:
+#   EXTRACT_PADDLEOCR_VL_API_URL=<endpoint>
+#   AISTUDIO_ACCESS_TOKEN=<token>
+# The adapter also accepts EXTRACT_AISTUDIO_ACCESS_TOKEN, PADDLEOCR_ACCESS_TOKEN,
+# EXTRACT_PADDLEOCR_ACCESS_TOKEN, or the AI Studio token cache file.
+# See docs/paddle_ocr/paddleocr_vl_setup.md for the brillar env compatibility
+# note before changing the shared LangChain dependency line.

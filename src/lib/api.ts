@@ -1,11 +1,3 @@
-/**
- * Typed API client for the ExtractIQ FastAPI backend.
- *
- * The backend runs on port 8000. The gateway forwards requests using the
- * `XTransformPort` query parameter, so every call appends `?XTransformPort=8000`.
- *
- * All requests use relative paths so they work behind the Caddy gateway.
- */
 import type {
   BatchApplyRequest,
   BatchProcessingResult,
@@ -14,13 +6,34 @@ import type {
   DocumentMetadata,
   DocumentUploadAck,
   EditableExtractionField,
+  ExtractionRunRequest,
+  ExtractionRunResponse,
+  ExtractionLabSchemaTemplate,
+  ExtractionLabSchema,
+  ExtractionReportResponse,
+  MultiDocumentExtractionRunRequest,
+  MultiDocumentExtractionRunResponse,
   ExtractionTemplate,
   OcrResult,
+  ParserInfo,
+  ParserInputInfo,
+  ParserCorrection,
+  ParserGroundTruth,
+  ParserResultDetail,
+  ParserRunRequest,
+  ParserRunResponse,
+  ParserRunSummary,
   RunSummary,
+  SchemaGenerationRequest,
+  SchemaGenerationResponse,
   TemplateCreate,
 } from "./types";
 
-const BACKEND_PORT = 8000;
+const BACKEND_URL = process.env.NEXT_PUBLIC_BACKEND_URL ?? "http://localhost:8000";
+
+function backendUrl(path: string): string {
+  return `${BACKEND_URL}${path}`;
+}
 
 export class ApiError extends Error {
   status: number;
@@ -32,13 +45,8 @@ export class ApiError extends Error {
   }
 }
 
-function withPort(path: string): string {
-  const sep = path.includes("?") ? "&" : "?";
-  return path.includes("XTransformPort") ? path : `${path}${sep}XTransformPort=${BACKEND_PORT}`;
-}
-
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
-  const res = await fetch(withPort(path), {
+  const res = await fetch(`${BACKEND_URL}${path}`, {
     ...init,
     headers: {
       ...(init?.headers ?? {}),
@@ -134,4 +142,103 @@ export const benchmarksApi = {
       body: JSON.stringify(body),
     }),
   get: (runId: string) => request<BenchmarkRun>(`/api/benchmarks/${runId}`),
+};
+
+/* ---------------- Parser Benchmarks ---------------- */
+export const parserBenchmarksApi = {
+  assetUrl: (path: string) => {
+    if (/^https?:\/\//i.test(path) || path.startsWith("data:")) return path;
+    return backendUrl(path.startsWith("/") ? path : `/${path}`);
+  },
+  inputs: () => request<ParserInputInfo[]>(`/api/parser-benchmarks/inputs`),
+  previewUrl: (inputId: string) =>
+    backendUrl(`/api/parser-benchmarks/preview/${encodeURIComponent(inputId)}`),
+  pageImageUrl: (inputId: string, page: number, zoom = 1.4) =>
+    backendUrl(
+      `/api/parser-benchmarks/preview-page/${encodeURIComponent(inputId)}?page=${page}&zoom=${zoom}`,
+    ),
+  previewText: (inputId: string) =>
+    fetch(backendUrl(`/api/parser-benchmarks/preview-text/${encodeURIComponent(inputId)}`)).then((res) => {
+      if (!res.ok) throw new ApiError(res.status, res.statusText);
+      return res.text();
+    }),
+  parsers: () => request<ParserInfo[]>(`/api/parser-benchmarks/parsers`),
+  runs: () => request<ParserRunSummary[]>(`/api/parser-benchmarks/runs`),
+  getRun: (runId: string) => request<ParserRunResponse>(`/api/parser-benchmarks/runs/${encodeURIComponent(runId)}`),
+  getResult: (runId: string, library: string) =>
+    request<ParserResultDetail>(
+      `/api/parser-benchmarks/runs/${encodeURIComponent(runId)}/results/${encodeURIComponent(library)}`,
+    ),
+  getGroundTruth: (inputId: string) =>
+    request<ParserGroundTruth>(`/api/parser-benchmarks/ground-truth/${encodeURIComponent(inputId)}`),
+  saveGroundTruth: (inputId: string, body: ParserGroundTruth) =>
+    request<ParserGroundTruth>(`/api/parser-benchmarks/ground-truth/${encodeURIComponent(inputId)}`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    }),
+  saveCorrections: (runId: string, library: string, body: ParserCorrection) =>
+    request<ParserCorrection>(
+      `/api/parser-benchmarks/runs/${encodeURIComponent(runId)}/results/${encodeURIComponent(library)}/corrections`,
+      {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      },
+    ),
+  run: (body: ParserRunRequest) =>
+    request<ParserRunResponse>(`/api/parser-benchmarks/run`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    }),
+};
+
+/* ---------------- Extraction Lab ---------------- */
+export const extractionLabApi = {
+  inputs: () => request<ParserInputInfo[]>(`/api/extraction-lab/inputs`),
+  parsers: () => request<ParserInfo[]>(`/api/extraction-lab/parsers`),
+  schemas: () => request<ExtractionLabSchemaTemplate[]>(`/api/extraction-lab/schemas`),
+  saveSchema: (schema: ExtractionLabSchema) =>
+    request<ExtractionLabSchemaTemplate>(`/api/extraction-lab/schemas`, {
+      method: "POST",
+      body: JSON.stringify(schema),
+      headers: { "Content-Type": "application/json" },
+    }),
+  upload: (file: File) => {
+    const form = new FormData();
+    form.append("file", file);
+    return request<ParserInputInfo>(`/api/extraction-lab/upload`, { method: "POST", body: form });
+  },
+  uploadMany: (files: File[]) => {
+    const form = new FormData();
+    for (const file of files) form.append("files", file);
+    return request<ParserInputInfo[]>(`/api/extraction-lab/upload-multiple`, { method: "POST", body: form });
+  },
+  run: (body: ExtractionRunRequest) =>
+    request<ExtractionRunResponse>(`/api/extraction-lab/run`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    }),
+  runMulti: (body: MultiDocumentExtractionRunRequest) =>
+    request<MultiDocumentExtractionRunResponse>(`/api/extraction-lab/run-multi`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    }),
+  generateSchema: (body: SchemaGenerationRequest) =>
+    request<SchemaGenerationResponse>(`/api/extraction-lab/generate-schema`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    }),
+  report: (body: { result: ExtractionRunResponse }) =>
+    request<ExtractionReportResponse>(`/api/extraction-lab/report`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    }),
+  getResults: (inputId: string) =>
+    request<ExtractionRunResponse[]>(`/api/extraction-lab/results/${encodeURIComponent(inputId)}`),
 };

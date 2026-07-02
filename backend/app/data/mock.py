@@ -229,20 +229,24 @@ class _Store:
         }
 
         # ---- Seed a completed benchmark run so the dashboard is populated ----
-        from app.models.benchmark import (
-            BenchmarkMetric, BenchmarkRun, BenchmarkStatus, FieldMetric, RunSummary,
-        )
-        from app.models.benchmark import BenchmarkRunCreate
-        # Build it via the service for realism
-        from app.services.benchmark_service import run_benchmark
+        from app.models.benchmark import BenchmarkMetric, BenchmarkRun, BenchmarkStatus
+        from app.models.document import utcnow
 
-        run_benchmark(
-            BenchmarkRunCreate(
-                template_id=tpl1.id,
-                document_ids=["doc-upl-001", "doc-corp-001", "doc-corp-002", "doc-corp-003"],
-                repeat=5,
-            )
+        benchmark = BenchmarkRun(
+            id=self.gen_id("bm"),
+            run_id=self.gen_run_id(),
+            template_id=tpl1.id,
+            template_name=tpl1.name,
+            document_ids=["doc-upl-001", "doc-corp-001", "doc-corp-002", "doc-corp-003"],
+            status=BenchmarkStatus.COMPLETED,
+            finished_at=utcnow(),
+            metrics=[
+                BenchmarkMetric(name="field_level_accuracy", label="Field-level Accuracy", value=0.91, target=0.95),
+                BenchmarkMetric(name="processing_latency", label="Processing Latency", value=220.0, unit="ms", target=1500.0),
+            ],
+            consistency_samples=[0.91, 0.908, 0.912, 0.91, 0.909],
         )
+        self.benchmarks[benchmark.id] = benchmark
 
 
 store = _Store()

@@ -1,4 +1,4 @@
-"""FastAPI application entrypoint for ExtractIQ.
+﻿"""FastAPI application entrypoint for Atenxion.
 
 Run with:
     uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
@@ -36,6 +36,27 @@ async def root():
 @app.get("/health", tags=["health"])
 async def health():
     return {"status": "ok"}
+
+
+# â”€â”€ Database lifecycle â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+
+
+@app.on_event("startup")
+async def startup():
+    if settings.database_url:
+        from app.db.engine import create_engine, init_db
+        create_engine()
+        await init_db()
+
+
+@app.on_event("shutdown")
+async def shutdown():
+    from app.db.engine import is_db_configured, dispose_db
+    if is_db_configured():
+        await dispose_db()
+
+
+# â”€â”€ Routes â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 
 app.include_router(api_router, prefix="/api")

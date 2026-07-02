@@ -181,6 +181,294 @@ export interface BenchmarkRunCreate {
   repeat: number;
 }
 
+export type ParserStatus = "ok" | "skipped" | "failed";
+
+export interface ParserInputInfo {
+  id: string;
+  name: string;
+  input_type: "pdf" | "image" | string;
+  size_bytes: number;
+  path: string;
+  page_count: number;
+}
+
+export interface ParserInfo {
+  id: string;
+  name: string;
+  supported_input_types: string[];
+  installed: boolean;
+  notes: string | null;
+}
+
+export interface ParserRunRequest {
+  input_id: string;
+  parsers: string[];
+  preview_chars: number;
+}
+
+export interface ParserArtifactPaths {
+  output_md: string | null;
+  structured_json: string | null;
+  corrections_json: string | null;
+}
+
+export interface ParserRunResult {
+  result_id: string;
+  run_id: string;
+  library: string;
+  input_file: string;
+  input_type: string;
+  status: ParserStatus;
+  seconds: number;
+  pages: number;
+  chars: number;
+  tables: number;
+  images: number;
+  error: string | null;
+  text_preview: string;
+  structured_preview: Record<string, unknown>;
+  artifact_paths: ParserArtifactPaths;
+}
+
+export interface ParserRunResponse {
+  run_id: string;
+  input: ParserInputInfo;
+  results: ParserRunResult[];
+  started_at: string;
+  finished_at: string;
+}
+
+export interface ParserRunSummary {
+  run_id: string;
+  input: ParserInputInfo;
+  parser_count: number;
+  ok: number;
+  skipped: number;
+  failed: number;
+  fastest_library: string | null;
+  fastest_seconds: number | null;
+  started_at: string;
+  finished_at: string;
+}
+
+export interface ParserGroundTruthField {
+  key: string;
+  label: string;
+  value: string;
+}
+
+export interface ParserGroundTruth {
+  input_id: string;
+  input_name: string;
+  expected_terms: string[];
+  expected_fields: ParserGroundTruthField[];
+  notes: string;
+  updated_at: string;
+}
+
+export interface ParserCorrection {
+  corrected_text: string;
+  notes: string;
+  updated_at: string;
+}
+
+export interface ParserQualityCheck {
+  key: string;
+  label: string;
+  expected: string;
+  found: boolean;
+  confidence: number;
+  match_type: string;
+}
+
+export interface ParserResultDetail {
+  run: ParserRunResponse;
+  result: ParserRunResult;
+  full_text: string;
+  ground_truth: ParserGroundTruth;
+  corrections: ParserCorrection;
+  quality_checks: ParserQualityCheck[];
+}
+
+export type ExtractionFieldType =
+  | "text"
+  | "number"
+  | "date"
+  | "currency"
+  | "email"
+  | "phone"
+  | "boolean"
+  | "list"
+  | "table"
+  | "object";
+
+export interface ExtractionSchemaField {
+  id: string;
+  key: string;
+  label: string;
+  type: ExtractionFieldType;
+  description: string | null;
+  required: boolean;
+  children: ExtractionSchemaField[];
+}
+
+export interface ExtractionLabSchema {
+  name: string;
+  description: string | null;
+  fields: ExtractionSchemaField[];
+}
+
+export interface ExtractionLabSchemaTemplate {
+  id: string;
+  label: string;
+  filename: string;
+  schema: ExtractionLabSchema;
+}
+
+export type ChunkingStrategy = "document" | "page" | "table_row" | "sliding_window" | "block";
+
+export interface ExtractionRunRequest {
+  input_id: string;
+  output_schema: ExtractionLabSchema;
+  natural_language_query?: string | null;
+  parser_id: string;
+  chunking_strategy: ChunkingStrategy;
+  chunk_size: number;
+  chunk_overlap: number;
+  max_pages: number;
+  max_candidates_per_field: number;
+  preview_chars: number;
+  evidence_mode: "cleaner" | "llm_vlm";
+  extraction_tier: "cost_effective" | "agentic" | "agentic_plus";
+}
+
+export type MultiDocumentMode = "per_document" | "cross_document";
+
+export interface MultiDocumentExtractionRunRequest extends ExtractionRunRequest {
+  input_ids: string[];
+  multi_document_mode: MultiDocumentMode;
+}
+
+export interface MultiDocumentExtractionRunResponse {
+  mode: MultiDocumentMode;
+  results: ExtractionRunResponse[];
+}
+
+export interface SchemaGenerationRequest {
+  input_ids: string[];
+  natural_language_query?: string | null;
+  parser_id: string;
+  multi_document_mode: MultiDocumentMode;
+  chunking_strategy: ChunkingStrategy;
+  chunk_size: number;
+  chunk_overlap: number;
+  max_pages: number;
+  preview_chars: number;
+}
+
+export interface SchemaGenerationResponse {
+  schema_definition: ExtractionLabSchema;
+  warnings: string[];
+}
+
+export interface ExtractionEvidence {
+  chunk_id: string;
+  page: number;
+  type: string;
+  text_preview: string;
+  bbox: Record<string, number> | null;
+}
+
+export interface ExtractionChunk {
+  id: string;
+  page: number;
+  type: string;
+  char_count: number;
+  text_preview: string;
+  bbox: Record<string, number> | null;
+  confidence: number | null;
+  risk: string;
+  warnings: string[];
+  source_url: string | null;
+  columns: string[];
+  rows: Record<string, string>[];
+  strategy: string;
+  table_index: number | null;
+  row_index: number | null;
+  header: string[] | null;
+  token_count: number | null;
+}
+
+export interface ExtractionFieldResult {
+  key: string;
+  label: string;
+  type: ExtractionFieldType;
+  required: boolean;
+  value: unknown;
+  raw_value: unknown;
+  confidence: number;
+  valid: boolean;
+  validation_message: string | null;
+  evidence: ExtractionEvidence[];
+}
+
+export interface ExtractionValidationError {
+  loc: string;
+  msg: string;
+  type: string;
+}
+
+export interface ExtractionRunStats {
+  parser_seconds: number;
+  total_seconds: number;
+  pages: number;
+  chunks: number;
+  fields: number;
+  candidates_scanned: number;
+  chunking_strategy: string;
+  chunk_tokens: number;
+  cleaned_evidence_used: boolean;
+  cleaned_evidence_items: number;
+  llm_reconstruction_used: boolean;
+  llm_reconstruction_items: number;
+  null_fields_detected: number;
+  null_retries: number;
+  recovered_nulls: number;
+  candidate_conflicts: number;
+  critic_issues: number;
+  consistency_score: number;
+  agentic_used: boolean;
+  adk_available: boolean;
+  model_used: string | null;
+}
+
+export interface ExtractionRunResponse {
+  run_id: string;
+  input: ParserInputInfo;
+  parser_id: string;
+  parser_name: string;
+  parser_run_id: string | null;
+  parser_run_started_at: string | null;
+  evidence_mode: "cleaner" | "llm_vlm";
+  extraction_tier: "cost_effective" | "agentic" | "agentic_plus";
+  schema_model_name: string;
+  schema_definition: ExtractionLabSchema;
+  natural_language_query: string | null;
+  data: Record<string, unknown>;
+  fields: ExtractionFieldResult[];
+  chunks: ExtractionChunk[];
+  validation_errors: ExtractionValidationError[];
+  warnings: string[];
+  generated_code: string;
+  stats: ExtractionRunStats;
+  started_at: string;
+  finished_at: string;
+}
+
+export interface ExtractionReportResponse {
+  report_markdown: string;
+}
+
 export type BatchItemStatus = "queued" | "processing" | "done" | "failed";
 
 export interface BatchItemResult {

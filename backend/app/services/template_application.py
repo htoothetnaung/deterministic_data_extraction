@@ -9,8 +9,8 @@ Responsibilities:
   * Return per-document ``BatchItemResult``.
 
 This is the core deterministic extraction pipeline — implement it by
-composing: document_parser -> ocr_extraction -> ocr_correction ->
-sentence_splitter -> chunker -> embedding -> field matching.
+composing: document_parser -> sentence_splitter -> chunker -> embedding ->
+field matching.
 """
 from __future__ import annotations
 
@@ -19,7 +19,7 @@ from typing import Optional
 
 from app.models.batch import BatchItemResult, BatchItemStatus
 from app.models.field import EditableExtractionField
-from app.services import ocr_extraction, document_parser  # noqa: F401  (placeholders)
+from app.services import document_parser  # noqa: F401  (placeholder)
 
 
 def _store():

@@ -1,77 +1,38 @@
 "use client";
 
 import * as React from "react";
+import Image from "next/image";
 import { cn } from "@/lib/utils";
 import { useNav, type ViewId } from "@/lib/store";
-import {
-  LayoutDashboard,
-  FileStack,
-  ScanText,
-  FileCode2,
-  Layers,
-  Gauge,
-  Sparkles,
-  Moon,
-  Sun,
-  Search,
-  CircleHelp,
-} from "lucide-react";
+import { CircleHelp, FileSearch, FlaskConical, Moon, Sun } from "lucide-react";
 import { useTheme } from "next-themes";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
 
 interface NavItem {
   id: ViewId;
   label: string;
   description: string;
   icon: React.ComponentType<{ className?: string }>;
-  step?: number;
+  step: number;
 }
 
 const NAV: { section: string; items: NavItem[] }[] = [
   {
-    section: "Workflow",
+    section: "Labs",
     items: [
       {
-        id: "dashboard",
-        label: "Dashboard",
-        description: "Overview & quick actions",
-        icon: LayoutDashboard,
-      },
-      {
-        id: "documents",
-        label: "Documents",
-        description: "Upload & select source documents",
-        icon: FileStack,
+        id: "extraction-lab",
+        label: "Extraction Lab",
+        description: "Define schemas and run deterministic extraction",
+        icon: FlaskConical,
         step: 1,
       },
       {
-        id: "ocr-review",
-        label: "Extraction Review",
-        description: "Edit OCR output & fields",
-        icon: ScanText,
+        id: "parser-lab",
+        label: "Parse Lab",
+        description: "Inspect parser outputs used as evidence",
+        icon: FileSearch,
         step: 2,
-      },
-      {
-        id: "templates",
-        label: "Templates",
-        description: "Create reusable extraction templates",
-        icon: FileCode2,
-        step: 3,
-      },
-      {
-        id: "apply-template",
-        label: "Apply Template",
-        description: "Batch extraction across documents",
-        icon: Layers,
-        step: 4,
-      },
-      {
-        id: "benchmarking",
-        label: "Benchmarking",
-        description: "Measure deterministic performance",
-        icon: Gauge,
-        step: 5,
       },
     ],
   },
@@ -83,31 +44,24 @@ export function Sidebar() {
 
   return (
     <aside className="flex h-full w-full flex-col bg-sidebar text-sidebar-foreground">
-      {/* Brand */}
       <div className="flex items-center gap-2.5 px-5 py-5">
-        <div className="flex size-9 items-center justify-center rounded-lg bg-primary text-primary-foreground shadow-sm">
-          <Sparkles className="size-5" />
+        <div className="flex size-10 items-center justify-center overflow-hidden rounded-xl bg-background shadow-sm ring-1 ring-border">
+          <Image
+            src="/atenxion_logo.png"
+            alt="Atenxion logo"
+            width={40}
+            height={40}
+            className="size-full object-cover"
+          />
         </div>
         <div className="leading-tight">
-          <p className="text-sm font-semibold tracking-tight">ExtractIQ</p>
+          <p className="text-sm font-semibold tracking-tight">Atenxion</p>
           <p className="text-[11px] text-muted-foreground">
             Deterministic Extraction
           </p>
         </div>
       </div>
 
-      {/* Quick search (decorative) */}
-      <div className="px-3 pb-2">
-        <div className="relative">
-          <Search className="pointer-events-none absolute left-2.5 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
-          <Input
-            placeholder="Search…"
-            className="h-8 bg-background/60 pl-8 text-xs"
-          />
-        </div>
-      </div>
-
-      {/* Nav */}
       <nav className="flex-1 space-y-6 overflow-y-auto scrollbar-thin px-3 py-3">
         {NAV.map((group) => (
           <div key={group.section}>
@@ -141,18 +95,16 @@ export function Sidebar() {
                         )}
                       />
                       <span className="flex-1 truncate">{item.label}</span>
-                      {item.step ? (
-                        <span
-                          className={cn(
-                            "flex size-5 items-center justify-center rounded-full text-[10px] font-semibold tabular-nums",
-                            active
-                              ? "bg-primary text-primary-foreground"
-                              : "bg-muted text-muted-foreground",
-                          )}
-                        >
-                          {item.step}
-                        </span>
-                      ) : null}
+                      <span
+                        className={cn(
+                          "flex size-5 items-center justify-center rounded-full text-[10px] font-semibold tabular-nums",
+                          active
+                            ? "bg-primary text-primary-foreground"
+                            : "bg-muted text-muted-foreground",
+                        )}
+                      >
+                        {item.step}
+                      </span>
                     </button>
                   </li>
                 );
@@ -162,16 +114,21 @@ export function Sidebar() {
         ))}
       </nav>
 
-      {/* Footer */}
       <div className="border-t border-sidebar-border px-3 py-3">
         <div className="flex items-center gap-2 rounded-lg px-2.5 py-2">
-          <div className="flex size-8 items-center justify-center rounded-full bg-primary/10 text-primary text-xs font-semibold">
-            EX
+          <div className="flex size-8 items-center justify-center overflow-hidden rounded-full bg-background ring-1 ring-border">
+            <Image
+              src="/atenxion_logo.png"
+              alt="Atenxion"
+              width={32}
+              height={32}
+              className="size-full object-cover"
+            />
           </div>
           <div className="min-w-0 flex-1 leading-tight">
-            <p className="truncate text-xs font-medium">Extraction Team</p>
+            <p className="truncate text-xs font-medium">Atenxion Team</p>
             <p className="truncate text-[11px] text-muted-foreground">
-              Enterprise workspace
+              Parser-to-extraction workspace
             </p>
           </div>
           <Button variant="ghost" size="icon" className="size-7" aria-label="Help">

@@ -7,6 +7,7 @@ from typing import Optional
 from fastapi import APIRouter, File, UploadFile, HTTPException, Query
 
 from app.core.config import settings
+from app.db.engine import get_factory, is_db_configured
 from app.data.mock import store
 from app.models.document import (
     DocumentMetadata,
@@ -17,6 +18,7 @@ from app.models.document import (
 )
 from app.models.document import utcnow
 from app.services import document_parser
+from app.services.production_extraction import list_document_evidence_db
 
 router = APIRouter(prefix="/documents", tags=["documents"])
 
@@ -97,6 +99,14 @@ async def get_document(document_id: str):
     return doc
 
 
+@router.get("/{document_id}/evidence")
+async def document_evidence(document_id: str):
+    if is_db_configured():
+        async with get_factory()() as session:
+            return await list_document_evidence_db(session, document_id)
+    return []
+
+
 @router.delete("/{document_id}")
 async def delete_document(document_id: str):
     if store.documents.pop(document_id, None) is None:
@@ -110,7 +120,7 @@ async def process_document(document_id: str):
     """Trigger OCR/extraction processing for a document.
 
     PLACEHOLDER: generates a mock OCR result. Replace with a real pipeline
-    composed of: document_parser -> ocr_extraction -> ocr_correction.
+    composed of: document_parser -> sentence_splitter -> chunker -> embedding.
     """
     doc = store.documents.get(document_id)
     if not doc:
@@ -122,7 +132,7 @@ async def process_document(document_id: str):
 
     blocks = [
         OcrBlock(id="blk-1", page=1, type=BlockType.HEADING, text=doc.name, confidence=0.94),
-        OcrBlock(id="blk-2", page=1, type=BlockType.TEXT, text="(Placeholder OCR output — implement real extraction in app/services/ocr_extraction.py)", confidence=0.8),
+        OcrBlock(id="blk-2", page=1, type=BlockType.TEXT, text="(Placeholder OCR output — implement real extraction in the parser pipeline.)", confidence=0.8),
     ]
     ocr = OcrResult(
         id=store.gen_id("ocr"),

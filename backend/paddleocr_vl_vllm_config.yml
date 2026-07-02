@@ -1,0 +1,5 @@
+# Conservative vLLM server defaults for a laptop GPU.
+# Increase these only after the one-page Parser Lab smoke test is stable.
+gpu-memory-utilization: 0.75
+max-model-len: 16384
+max-num-seqs: 1

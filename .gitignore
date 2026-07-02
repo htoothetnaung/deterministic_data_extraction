@@ -1,54 +1,121 @@
-# See https://help.github.com/articles/ignoring-files/ for more about ignoring files.
-
 # dependencies
-node_modules
-/.pnp
+node_modules/
+.pnp
 .pnp.*
 .yarn/*
 !.yarn/patches
 !.yarn/plugins
 !.yarn/releases
 !.yarn/versions
+.pnpm-store/
 
 # testing
-/coverage
+.pytest_cache/
+coverage/
 
 # next.js
-/.next/
-/out/
+.next/
+out/
 
 # production
-/build
+build/
 
-# misc
-.DS_Store
-*.pem
+# python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+*.egg
+dist/
+build/
+*.whl
+.venv/
+venv/
+env/
+.python-version
 
-# debug
+# environment & secrets
+.env
+.env.*
+!.env.example
+
+# logs
+*.log
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
 .pnpm-debug.log*
 
-# env files (can opt-in for committing if needed)
-.env*
+# debug
+dev-verify.err.log
+dev-verify.out.log
+dev.log
+dev.out.log
+frontend-dev.log
+server.log
+backend-8001.err.log
+backend-8001.out.log
+backend-brillar.err.log
+backend-brillar.out.log
 
-# vercel
-.vercel
-
+# misc
+.DS_Store
+Thumbs.db
+*.pem
+.cache/
 
 # typescript
 *.tsbuildinfo
 next-env.d.ts
-local-*
-.claude
-.z-ai-config
-*.log
-dev.log
-dev.out.log
-test
-prompt
 
-server.log
-# Skills directory
+# uploads & user data
+upload/
+backend/uploads/
+download/
+
+# database files
+db/*.db
+db/*.sqlite
+*.db-journal
+
+# model weights
+model_weights/
+
+# tool output & caches
+tool-results/
+.agents/
+.codex/
+.z-ai-config
+
+# logs directories
+logs/
+
+# editor & IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# local config overrides
+local-*
+
+# skills
 /skills/
+
+# data directories
+data/
+backend/parser_outputs/
+
+# notebooks
+notebooks/
+
+# vercel
+.vercel
+
+# embedded repos (add as submodules if needed)
+BExtract/
+atenxion-docling/
+
+# docker
+docker-compose.override.yml
