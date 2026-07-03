@@ -101,6 +101,8 @@ def parse(input_path: Path, preview_chars: int = 1500) -> ParserRunResult:
                     },
                 )
                 if block:
+                    if region.get("row_bboxes"):
+                        block["row_bboxes"] = region["row_bboxes"]
                     blocks.append(block)
                 if len(table_samples) < 5:
                     table = region["table"]
@@ -195,7 +197,20 @@ def _table_regions(page: Any) -> list[dict[str, Any]]:
         bbox = bbox_from_values(*table.bbox)
         markdown = _table_to_markdown(extracted)
         if bbox and markdown:
-            output.append({"bbox": bbox, "table": extracted, "markdown": markdown})
+            row_bboxes: list[dict[str, float] | None] = []
+            for row in getattr(table, "rows", []):
+                cells = [c for c in getattr(row, "cells", []) if c and len(c) == 4]
+                if cells:
+                    r_bbox = bbox_from_values(
+                        min(float(c[0]) for c in cells),
+                        min(float(c[1]) for c in cells),
+                        max(float(c[2]) for c in cells),
+                        max(float(c[3]) for c in cells),
+                    )
+                    row_bboxes.append(r_bbox)
+                else:
+                    row_bboxes.append(None)
+            output.append({"bbox": bbox, "table": extracted, "markdown": markdown, "row_bboxes": row_bboxes})
     return output
 
 

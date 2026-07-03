@@ -13,6 +13,7 @@ import type {
   ExtractionReportResponse,
   MultiDocumentExtractionRunRequest,
   MultiDocumentExtractionRunResponse,
+  JobHistoryItem,
   ExtractionTemplate,
   OcrResult,
   ParserInfo,
@@ -196,6 +197,8 @@ export const parserBenchmarksApi = {
 
 /* ---------------- Extraction Lab ---------------- */
 export const extractionLabApi = {
+  history: () => request<JobHistoryItem[]>(`/api/extraction-lab/history`),
+  getJobResult: (runId: string) => request<ExtractionRunResponse>(`/api/extraction-lab/results/job/${encodeURIComponent(runId)}`),
   inputs: () => request<ParserInputInfo[]>(`/api/extraction-lab/inputs`),
   parsers: () => request<ParserInfo[]>(`/api/extraction-lab/parsers`),
   schemas: () => request<ExtractionLabSchemaTemplate[]>(`/api/extraction-lab/schemas`),
@@ -204,6 +207,10 @@ export const extractionLabApi = {
       method: "POST",
       body: JSON.stringify(schema),
       headers: { "Content-Type": "application/json" },
+    }),
+  deleteSchema: (schemaId: string) =>
+    request<{ ok: boolean; deleted_id: string }>(`/api/extraction-lab/schemas/${encodeURIComponent(schemaId)}`, {
+      method: "DELETE",
     }),
   upload: (file: File) => {
     const form = new FormData();
@@ -215,6 +222,10 @@ export const extractionLabApi = {
     for (const file of files) form.append("files", file);
     return request<ParserInputInfo[]>(`/api/extraction-lab/upload-multiple`, { method: "POST", body: form });
   },
+  deleteInput: (inputId: string) =>
+    request<{ ok: boolean; deleted_id: string }>(`/api/extraction-lab/inputs/${encodeURIComponent(inputId)}`, {
+      method: "DELETE",
+    }),
   run: (body: ExtractionRunRequest) =>
     request<ExtractionRunResponse>(`/api/extraction-lab/run`, {
       method: "POST",
@@ -241,4 +252,8 @@ export const extractionLabApi = {
     }),
   getResults: (inputId: string) =>
     request<ExtractionRunResponse[]>(`/api/extraction-lab/results/${encodeURIComponent(inputId)}`),
+  deleteResult: (runId: string) =>
+    request<{ ok: boolean; deleted_run_id: string }>(`/api/extraction-lab/results/${encodeURIComponent(runId)}`, {
+      method: "DELETE",
+    }),
 };

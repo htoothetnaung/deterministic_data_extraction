@@ -23,8 +23,10 @@ import {
   HelpCircle,
   Info,
   Loader2,
+  MapPin,
   Maximize2,
   MoreVertical,
+  Pencil,
   Play,
   Plus,
   RefreshCw,
@@ -42,6 +44,8 @@ import {
   Hash,
   ToggleLeft,
   List,
+  Search,
+  Calendar,
 } from "lucide-react";
 
 import { Badge } from "@/components/app/badges";
@@ -73,6 +77,12 @@ import { Textarea } from "@/components/ui/textarea";
 import { Switch } from "@/components/ui/switch";
 import { Slider } from "@/components/ui/slider";
 import {
+  DropdownMenu,
+  DropdownMenuTrigger,
+  DropdownMenuContent,
+  DropdownMenuItem,
+} from "@/components/ui/dropdown-menu";
+import {
   Tooltip,
   TooltipContent,
   TooltipTrigger,
@@ -93,6 +103,7 @@ import type {
   MultiDocumentMode,
   ParserInfo,
   ParserInputInfo,
+  JobHistoryItem,
 } from "@/lib/types";
 
 const EMPTY_INPUTS: ParserInputInfo[] = [];
@@ -121,8 +132,7 @@ const FIELD_TYPE_LABEL: Record<ExtractionFieldType, string> = {
   object: "OBJ",
 };
 
-type EvidenceMode = "cleaner" | "llm_vlm";
-type ExtractTier = "cost_effective" | "agentic" | "agentic_plus";
+type ExtractTier = "cost_effective" | "agentic";
 type LatestParserRun = {
   runId: string;
   startedAt: string;
@@ -266,8 +276,7 @@ export function ExtractionLabView() {
   const [naturalLanguageQuery, setNaturalLanguageQuery] = React.useState("");
   const [maxPages, setMaxPages] = React.useState(20);
   const [maxCandidates, setMaxCandidates] = React.useState(8);
-  const [evidenceMode, setEvidenceMode] = React.useState<EvidenceMode>("cleaner");
-  const [chunkingStrategy, setChunkingStrategy] = React.useState<ChunkingStrategy>("page");
+  const [chunkingStrategy, setChunkingStrategy] = React.useState<ChunkingStrategy>("table_row");
   const [chunkSize, setChunkSize] = React.useState(500);
   const [chunkOverlap, setChunkOverlap] = React.useState(80);
   const [extractTier, setExtractTier] = React.useState<ExtractTier>("cost_effective");
@@ -351,15 +360,7 @@ export function ExtractionLabView() {
     [inputs, selectedInputIds],
   );
 
-  React.useEffect(() => {
-    if (selectedInputId || inputs.length === 0) return;
-    const preferred =
-      inputs.find((input) => input.input_type === "pdf") ??
-      inputs.find((input) => input.input_type === "image") ??
-      inputs[0];
-    setSelectedInputId(preferred.id);
-    setSelectedInputIds([preferred.id]);
-  }, [inputs, selectedInputId]);
+
 
   React.useEffect(() => {
     setSchemaJson(JSON.stringify(schema, null, 2));
@@ -430,7 +431,6 @@ export function ExtractionLabView() {
         max_pages: maxPages,
         max_candidates_per_field: maxCandidates,
         preview_chars: 8000,
-        evidence_mode: evidenceMode,
         extraction_tier: extractTier,
       };
       if (inputIds.length > 1) {
@@ -452,6 +452,22 @@ export function ExtractionLabView() {
       });
     },
     onError: (error) => toast.error("Extraction failed", { description: String(error) }),
+  });
+
+  const deleteResultM = useMutation({
+    mutationFn: (runId: string) => extractionLabApi.deleteResult(runId),
+    onSuccess: (data) => {
+      setResults((current) => {
+        const next = current.filter((item) => item.run_id !== data.deleted_run_id);
+        if (selectedResultId === data.deleted_run_id) {
+          const nextSelected = next[0]?.run_id ?? "";
+          setSelectedResultId(nextSelected);
+        }
+        return next;
+      });
+      toast.success("Extraction result deleted");
+    },
+    onError: (error) => toast.error("Delete failed", { description: String(error) }),
   });
 
   const generateSchemaM = useMutation({
@@ -486,6 +502,15 @@ export function ExtractionLabView() {
       toast.success("Template saved", { description: `"${tpl.label}" added to templates.` });
     },
     onError: (error) => toast.error("Failed to save template", { description: String(error) }),
+  });
+
+  const deleteSchemaM = useMutation({
+    mutationFn: (id: string) => extractionLabApi.deleteSchema(id),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["extraction-lab-schemas"] });
+      toast.success("Template deleted", { description: "Template was removed." });
+    },
+    onError: (error) => toast.error("Failed to delete template", { description: String(error) }),
   });
 
   const canRun =
@@ -553,6 +578,43 @@ export function ExtractionLabView() {
     if (firstEvidencePage) setPage(firstEvidencePage);
   }
 
+  function updateResultFieldValue(fieldKey: string, value: unknown, sourceField: ExtractionFieldResult) {
+    const targetRunId = result?.run_id;
+    if (!targetRunId) return;
+    setResults((current) =>
+      current.map((item) => {
+        if (item.run_id !== targetRunId) return item;
+        const fieldExists = item.fields.some((field) => field.key === fieldKey);
+        const nextFields = fieldExists
+          ? item.fields.map((field) =>
+              field.key === fieldKey
+                ? {
+                    ...field,
+                    value,
+                    valid: true,
+                    validation_message: null,
+                  }
+                : field,
+            )
+          : [
+              ...item.fields,
+              {
+                ...sourceField,
+                value,
+                raw_value: sourceField.raw_value ?? sourceField.value,
+                valid: true,
+                validation_message: null,
+              },
+            ];
+        return {
+          ...item,
+          data: setResultDataValue(item.data, fieldKey, value),
+          fields: nextFields,
+        };
+      }),
+    );
+  }
+
   function applyJsonSchema() {
     try {
       const parsed = normalizeSchema(JSON.parse(schemaJson));
@@ -599,6 +661,17 @@ export function ExtractionLabView() {
     setSelectedInputIds(next);
     if (checked) setSelectedInputId(inputId);
     if (!checked && selectedInputId === inputId) setSelectedInputId(next[0] ?? "");
+  }
+
+  function removeInput(inputId: string) {
+    setSelectedInputIds((current) => {
+      const next = current.filter((id) => id !== inputId);
+      if (selectedInputId === inputId) setSelectedInputId(next[0] ?? "");
+      return next;
+    });
+    extractionLabApi.deleteInput(inputId).then(() => {
+      qc.invalidateQueries({ queryKey: ["extraction-lab-inputs"] });
+    });
   }
 
   return (
@@ -672,7 +745,7 @@ export function ExtractionLabView() {
               selectedFieldKey={selectedFieldKey}
               onPageChange={setPage}
               onZoomChange={setResultZoom}
-              onFieldSelect={setSelectedFieldKey}
+              onFieldSelect={selectResultField}
               hoveredFieldKey={hoveredFieldKey}
               onHoverField={setHoveredFieldKey}
             />
@@ -687,6 +760,7 @@ export function ExtractionLabView() {
                 inputsLoading={inputsQ.isLoading}
                 onSelectInput={selectPrimaryInput}
                 onToggleInput={toggleInput}
+                onRemoveInput={removeInput}
                 onMultiDocumentModeChange={setMultiDocumentMode}
                 onUpload={() => fileInputRef.current?.click()}
                 page={boundedPage}
@@ -725,6 +799,12 @@ export function ExtractionLabView() {
               >
                 Code
               </TabsTrigger>
+              <TabsTrigger
+                value="history"
+                className="rounded-none border-b-2 border-transparent px-4 py-2.5 text-sm font-medium text-muted-foreground transition-colors data-[state=active]:border-foreground data-[state=active]:bg-transparent data-[state=active]:text-foreground data-[state=active]:shadow-none"
+              >
+                History
+              </TabsTrigger>
             </TabsList>
             <div className="flex flex-wrap items-center gap-1.5 pb-1">
               {result ? (
@@ -732,12 +812,36 @@ export function ExtractionLabView() {
                   <Badge tone={result.validation_errors.length ? "amber" : "emerald"}>
                     {result.validation_errors.length ? `${result.validation_errors.length} validation issue` : "Valid"}
                   </Badge>
+                  {result.stats.retrieval_mode && (
+                    <Badge
+                      tone={
+                        result.stats.retrieval_mode === "full_pipeline"
+                          ? "emerald"
+                          : result.stats.retrieval_mode === "dense_only"
+                          ? "teal"
+                          : result.stats.retrieval_mode === "bm25_only"
+                          ? "amber"
+                          : result.stats.retrieval_mode === "fts_fallback"
+                          ? "rose"
+                          : "slate"
+                      }
+                    >
+                      {result.stats.retrieval_mode === "full_pipeline"
+                        ? "Hybrid (Dense + BM25)"
+                        : result.stats.retrieval_mode === "dense_only"
+                        ? "Dense Only"
+                        : result.stats.retrieval_mode === "bm25_only"
+                        ? "BM25 Only"
+                        : result.stats.retrieval_mode === "fts_fallback"
+                        ? "FTS Fallback"
+                        : result.stats.retrieval_mode === "in_memory"
+                        ? "In-Memory Preview"
+                        : result.stats.retrieval_mode}
+                    </Badge>
+                  )}
                   <Badge tone="slate">{result.stats.chunks} chunks</Badge>
-                  {result.stats.cleaned_evidence_used ? (
-                    <Badge tone="teal">{result.stats.cleaned_evidence_items} cleaned evidence</Badge>
-                  ) : null}
-                  <Badge tone={result.evidence_mode === "llm_vlm" ? "violet" : "slate"}>
-                    {result.evidence_mode === "llm_vlm" ? "LLM/VLM" : "Cleaner"}
+                  <Badge tone={result.extraction_tier === "agentic" ? "violet" : "slate"}>
+                    {result.extraction_tier === "agentic" ? "Agentic" : "Cost effective"}
                   </Badge>
                 </>
               ) : (
@@ -780,13 +884,11 @@ export function ExtractionLabView() {
               parserInstalled={parserInstalled}
               maxPages={maxPages}
               maxCandidates={maxCandidates}
-              evidenceMode={evidenceMode}
               chunkingStrategy={chunkingStrategy}
               chunkSize={chunkSize}
               chunkOverlap={chunkOverlap}
               latestByParser={latestByParser}
               onParserChange={setParserId}
-              onEvidenceModeChange={setEvidenceMode}
               onMaxPagesChange={setMaxPages}
               onMaxCandidatesChange={setMaxCandidates}
               onChunkingStrategyChange={setChunkingStrategy}
@@ -800,15 +902,27 @@ export function ExtractionLabView() {
               actions={
                 <div className="flex flex-wrap items-center gap-2">
                   {schemaTemplates.map((template) => (
-                    <Button
-                      key={template.id}
-                      size="sm"
-                      variant="outline"
-                      onClick={() => setSchema(cloneSchema(template.schema))}
-                      title={template.filename}
-                    >
-                      {template.label}
-                    </Button>
+                    <div key={template.id} className="relative group/template flex items-center">
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        onClick={() => setSchema(cloneSchema(template.schema))}
+                        title={template.filename}
+                        className="pr-7 relative font-medium transition-all"
+                      >
+                        {template.label}
+                      </Button>
+                      <button
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          deleteSchemaM.mutate(template.id);
+                        }}
+                        className="absolute right-1.5 opacity-60 hover:opacity-100 text-muted-foreground hover:text-destructive p-0.5 rounded transition-all"
+                        title={`Delete ${template.label} template`}
+                      >
+                        <X className="size-3" />
+                      </button>
+                    </div>
                   ))}
                   <Button size="sm" variant="outline" onClick={resetManualSchema}>
                     Manual
@@ -912,6 +1026,7 @@ export function ExtractionLabView() {
               onActiveResultTabChange={setActiveResultTab}
               confidenceThreshold={confidenceThreshold}
               onConfidenceThresholdChange={setConfidenceThreshold}
+              onFieldValueChange={updateResultFieldValue}
               hoveredFieldKey={hoveredFieldKey}
               onHoverField={setHoveredFieldKey}
               onStartOver={() => {
@@ -922,11 +1037,34 @@ export function ExtractionLabView() {
                 if (canRun) runM.mutate();
                 selectResultField(null);
               }}
+              onDeleteResult={(runId) => deleteResultM.mutate(runId)}
             />
           </TabsContent>
 
           <TabsContent value="code" className="mt-0">
             <CodePanel schema={schema} result={result} />
+          </TabsContent>
+
+          <TabsContent value="history" className="mt-0">
+            <HistoryTab
+              onLoadResult={async (runId) => {
+                try {
+                  toast.loading("Loading result...", { id: "load-result" });
+                  const data = await extractionLabApi.getJobResult(runId);
+                  setResults((current) => [data, ...current.filter((item) => item.run_id !== data.run_id)]);
+                  setSelectedResultId(data.run_id);
+                  setPage(1);
+                  if (data.schema_definition) {
+                    setSchema(cloneSchema(data.schema_definition));
+                  }
+                  setActiveTab("results");
+                  toast.success("Result loaded", { id: "load-result" });
+                } catch (err) {
+                  toast.error("Failed to load result", { id: "load-result", description: String(err) });
+                }
+              }}
+              onDeleteResult={(runId) => deleteResultM.mutate(runId)}
+            />
           </TabsContent>
         </Tabs>
       </div>
@@ -943,6 +1081,7 @@ function DocumentPanel({
   inputsLoading,
   onSelectInput,
   onToggleInput,
+  onRemoveInput,
   onMultiDocumentModeChange,
   onUpload,
   page,
@@ -957,6 +1096,7 @@ function DocumentPanel({
   inputsLoading: boolean;
   onSelectInput: (inputId: string) => void;
   onToggleInput: (inputId: string, checked: boolean) => void;
+  onRemoveInput: (inputId: string) => void;
   onMultiDocumentModeChange: (mode: MultiDocumentMode) => void;
   onUpload: () => void;
   page: number;
@@ -999,14 +1139,22 @@ function DocumentPanel({
             </div>
             <div className="max-h-40 space-y-2 overflow-auto pr-1">
               {inputs.map((input) => (
-                <label key={input.id} className="flex cursor-pointer items-center gap-2 rounded-md px-1 py-1 text-sm hover:bg-muted/40">
+                <div key={input.id} className="flex items-center gap-2 rounded-md px-1 py-1 text-sm hover:bg-muted/40">
                   <Checkbox
                     checked={selectedInputIds.includes(input.id)}
                     onCheckedChange={(checked) => onToggleInput(input.id, checked === true)}
                   />
                   <span className="min-w-0 flex-1 truncate">{input.name}</span>
                   <span className="shrink-0 text-xs text-muted-foreground">{input.input_type}</span>
-                </label>
+                  <button
+                    type="button"
+                    className="shrink-0 rounded p-0.5 text-muted-foreground transition-colors hover:bg-destructive/10 hover:text-destructive"
+                    onClick={() => onRemoveInput(input.id)}
+                    title="Remove document"
+                  >
+                    <Trash2 className="size-3.5" />
+                  </button>
+                </div>
               ))}
             </div>
             {selectedInputIds.length > 1 ? (
@@ -1236,21 +1384,15 @@ function ExtractTierPanel({
   const tierCopy: Record<ExtractTier, { title: string; credits: string; description: string; badge: string }> = {
     cost_effective: {
       title: "Cost Effective",
-      credits: "15 cr",
-      description: "Reliable extraction for well-structured documents with clear fields",
-      badge: "15 credits/page",
+      credits: "",
+      description: "",
+      badge: "",
     },
     agentic: {
       title: "Agentic",
-      credits: "25 cr",
-      description: "Agentic extraction for complex evidence, tables, and schema reasoning",
-      badge: "25 credits/page",
-    },
-    agentic_plus: {
-      title: "Agentic Plus - Coming Soon",
       credits: "",
-      description: "Advanced extraction orchestration is not available yet",
-      badge: "Coming soon",
+      description: "Agentic extraction for complex evidence, tables, and schema reasoning",
+      badge: "",
     },
   };
   const selected = tierCopy[tier];
@@ -1258,22 +1400,19 @@ function ExtractTierPanel({
   return (
     <SectionCard title="Extract Tier" description="Cost effective uses local hybrid retrieval; agentic adds bounded Gemini/ADK consistency checks.">
       <div className="space-y-5">
-        <div className="grid gap-3 md:grid-cols-3">
+        <div className="grid gap-3 md:grid-cols-2">
           {(Object.keys(tierCopy) as ExtractTier[]).map((item) => {
             const isSelected = tier === item;
-            const isDisabled = item === "agentic_plus";
             return (
               <button
                 key={item}
                 type="button"
-                disabled={isDisabled}
                 onClick={() => onTierChange(item)}
                 className={cn(
                   "min-h-20 rounded-lg border px-4 py-3 text-center transition",
                   isSelected
                     ? "border-primary bg-primary/10 text-foreground ring-1 ring-primary/40"
                     : "border-transparent bg-muted/20 hover:border-border",
-                  isDisabled && "cursor-not-allowed opacity-45 hover:border-transparent",
                 )}
               >
                 <p className="text-xs font-semibold uppercase tracking-[0.18em] text-muted-foreground">
@@ -1289,7 +1428,7 @@ function ExtractTierPanel({
 
         <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-border bg-muted/10 px-4 py-3">
           <p className="min-w-0 text-base text-muted-foreground">{selected.description}</p>
-          <Badge tone={tier === "agentic_plus" ? "slate" : "violet"}>{selected.badge}</Badge>
+          <Badge tone="violet">{selected.badge}</Badge>
         </div>
 
         <div className="border-t border-border/70 pt-3">
@@ -1330,7 +1469,6 @@ function ExtractTierPanel({
                   <SelectContent>
                     <SelectItem value="cost_effective">Cost effective · 5 credits/page</SelectItem>
                     <SelectItem value="agentic">Agentic · 10 credits/page</SelectItem>
-                    <SelectItem value="agentic_plus">Agentic plus · coming soon</SelectItem>
                   </SelectContent>
                 </Select>
               </div>
@@ -1540,13 +1678,11 @@ function ConfigurationPanel({
   parserInstalled,
   maxPages,
   maxCandidates,
-  evidenceMode,
   chunkingStrategy,
   chunkSize,
   chunkOverlap,
   latestByParser,
   onParserChange,
-  onEvidenceModeChange,
   onMaxPagesChange,
   onMaxCandidatesChange,
   onChunkingStrategyChange,
@@ -1558,13 +1694,11 @@ function ConfigurationPanel({
   parserInstalled: boolean;
   maxPages: number;
   maxCandidates: number;
-  evidenceMode: EvidenceMode;
   chunkingStrategy: ChunkingStrategy;
   chunkSize: number;
   chunkOverlap: number;
   latestByParser: Map<string, LatestParserRun>;
   onParserChange: (parserId: string) => void;
-  onEvidenceModeChange: (mode: EvidenceMode) => void;
   onMaxPagesChange: (maxPages: number) => void;
   onMaxCandidatesChange: (maxCandidates: number) => void;
   onChunkingStrategyChange: (strategy: ChunkingStrategy) => void;
@@ -1572,8 +1706,8 @@ function ConfigurationPanel({
   onChunkOverlapChange: (overlap: number) => void;
 }) {
   const chunkStrategies: { value: ChunkingStrategy; label: string; hint: string }[] = [
-    { value: "block", label: "Per block", hint: "One chunk per parser block/table/image (default)." },
-    { value: "table_row", label: "Per table row", hint: "Tables split into one self-describing chunk per row; text stays per block." },
+    { value: "block", label: "Per block", hint: "One chunk per parser block/table/image." },
+    { value: "table_row", label: "Per table row", hint: "Tables split into one chunk per row with exact row bounding box (recommended default)." },
     { value: "page", label: "Per page", hint: "One chunk per document page." },
     { value: "document", label: "Whole document", hint: "Single chunk for the entire document (coarsest)." },
     { value: "sliding_window", label: "Sliding window", hint: "Overlapping token windows over the full text." },
@@ -1581,8 +1715,8 @@ function ConfigurationPanel({
   const activeStrategy = chunkStrategies.find((s) => s.value === chunkingStrategy);
   const windowStrategy = chunkingStrategy === "sliding_window";
   return (
-    <SectionCard title="Configuration" description="Parser output, evidence mode, chunking, and field retrieval">
-      <div className="grid gap-4 md:grid-cols-4">
+    <SectionCard title="Configuration" description="Parser output, chunking, and field retrieval">
+      <div className="grid gap-4 md:grid-cols-3">
         <div className="space-y-1.5">
           <Label className="text-xs text-muted-foreground">Parser</Label>
           <Select value={parserId} onValueChange={onParserChange}>
@@ -1611,31 +1745,6 @@ function ConfigurationPanel({
           {parserId !== "auto" && !latestByParser.has(parserId) ? (
             <p className="text-xs text-amber-600 dark:text-amber-300">Run this parser in Parse Lab before extraction.</p>
           ) : null}
-        </div>
-
-        <div className="space-y-1.5">
-          <Label className="text-xs text-muted-foreground">Evidence mode</Label>
-          <div className="grid grid-cols-2 rounded-lg border border-border bg-muted/20 p-1">
-            <Button
-              type="button"
-              size="sm"
-              variant={evidenceMode === "cleaner" ? "default" : "ghost"}
-              onClick={() => onEvidenceModeChange("cleaner")}
-            >
-              Cleaner
-            </Button>
-            <Button
-              type="button"
-              size="sm"
-              variant={evidenceMode === "llm_vlm" ? "default" : "ghost"}
-              onClick={() => onEvidenceModeChange("llm_vlm")}
-            >
-              LLM/VLM
-            </Button>
-          </div>
-          <p className="text-xs text-muted-foreground">
-            {evidenceMode === "cleaner" ? "No model call; normalize saved parser evidence." : "Uses gpt-5-mini on top matched evidence only."}
-          </p>
         </div>
 
         <div className="space-y-1.5">
@@ -2040,10 +2149,12 @@ function ResultsPanel({
   onActiveResultTabChange,
   confidenceThreshold,
   onConfidenceThresholdChange,
+  onFieldValueChange,
   onStartOver,
   onRunAgain,
   hoveredFieldKey,
   onHoverField,
+  onDeleteResult,
 }: {
   result: ExtractionRunResponse | null;
   results: ExtractionRunResponse[];
@@ -2055,10 +2166,12 @@ function ResultsPanel({
   onActiveResultTabChange: (tab: "extract" | "json") => void;
   confidenceThreshold: number;
   onConfidenceThresholdChange: (value: number) => void;
+  onFieldValueChange: (fieldKey: string, value: unknown, sourceField: ExtractionFieldResult) => void;
   onStartOver: () => void;
   onRunAgain: () => void;
   hoveredFieldKey: string | null;
   onHoverField: (key: string | null) => void;
+  onDeleteResult: (runId: string) => void;
 }) {
   const scrollContainerRef = React.useRef<HTMLDivElement>(null);
 
@@ -2208,6 +2321,18 @@ function ResultsPanel({
           >
             <Download className="size-4" />
           </button>
+          <button
+            type="button"
+            className="flex size-9 items-center justify-center rounded-xl border border-destructive/20 bg-destructive/10 text-destructive shadow-sm transition-colors hover:bg-destructive/20"
+            onClick={() => {
+              if (confirm("Are you sure you want to delete this extraction result?")) {
+                onDeleteResult(selectedResultId || result.run_id);
+              }
+            }}
+            title="Delete result"
+          >
+            <Trash2 className="size-4" />
+          </button>
         </div>
       </div>
 
@@ -2229,6 +2354,34 @@ function ResultsPanel({
 
         {activeResultTab === "extract" ? (
           <div className="space-y-4 pr-1">
+            <div className="rounded-lg border border-border bg-card px-3 py-3">
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className="font-mono text-xs font-bold uppercase tracking-wider text-foreground">
+                    {totalFields} fields
+                  </span>
+                  <span className={cn(
+                    "font-mono text-xs font-semibold",
+                    belowThreshold > 0 ? "text-amber-600 dark:text-amber-300" : "text-muted-foreground",
+                  )}>
+                    {belowThreshold} below {confidenceThreshold}%
+                  </span>
+                </div>
+                <div className="flex min-w-[240px] items-center gap-3">
+                  <Slider
+                    value={[confidenceThreshold]}
+                    min={0}
+                    max={100}
+                    step={1}
+                    onValueChange={(value) => onConfidenceThresholdChange(value[0] ?? confidenceThreshold)}
+                    className="w-40"
+                  />
+                  <span className="w-10 text-right text-xs font-semibold tabular-nums text-muted-foreground">
+                    {confidenceThreshold}%
+                  </span>
+                </div>
+              </div>
+            </div>
             {sectionGroups.map((section, idx) => (
               <ExtractionSection
                 key={section.label || `section-${idx}`}
@@ -2236,6 +2389,7 @@ function ResultsPanel({
                 selectedFieldKey={selectedFieldKey}
                 onFieldSelect={onFieldSelect}
                 confidenceThreshold={confidenceThreshold}
+                onFieldValueChange={onFieldValueChange}
                 hoveredFieldKey={hoveredFieldKey}
                 onHoverField={onHoverField}
               />
@@ -2392,6 +2546,7 @@ function ExtractionSection({
   selectedFieldKey,
   onFieldSelect,
   confidenceThreshold,
+  onFieldValueChange,
   hoveredFieldKey,
   onHoverField,
 }: {
@@ -2399,6 +2554,7 @@ function ExtractionSection({
   selectedFieldKey: string | null;
   onFieldSelect: (key: string | null) => void;
   confidenceThreshold: number;
+  onFieldValueChange: (fieldKey: string, value: unknown, sourceField: ExtractionFieldResult) => void;
   hoveredFieldKey: string | null;
   onHoverField: (key: string | null) => void;
 }) {
@@ -2417,6 +2573,7 @@ function ExtractionSection({
         {section.fields.map((field) => {
           const isSelected = selectedFieldKey === field.key;
           const isHovered = hoveredFieldKey === field.key;
+          const isBelowThreshold = fieldConfidencePercent(field) < confidenceThreshold;
           const handleHover = (hover: boolean) => onHoverField(hover ? field.key : null);
 
           if (isTableField(field)) {
@@ -2425,8 +2582,9 @@ function ExtractionSection({
                 key={field.key}
                 field={field}
                 isSelected={isSelected}
-                isBelowThreshold={false}
+                isBelowThreshold={isBelowThreshold}
                 onSelect={() => onFieldSelect(isSelected ? null : field.key)}
+                onValueChange={(value) => onFieldValueChange(field.key, value, field)}
                 isHovered={isHovered}
                 onHover={handleHover}
               />
@@ -2439,7 +2597,9 @@ function ExtractionSection({
                 key={field.key}
                 field={field}
                 isSelected={isSelected}
+                isBelowThreshold={isBelowThreshold}
                 onSelect={() => onFieldSelect(isSelected ? null : field.key)}
+                onValueChange={(value) => onFieldValueChange(field.key, value, field)}
                 isHovered={isHovered}
                 onHover={handleHover}
               />
@@ -2452,7 +2612,9 @@ function ExtractionSection({
                 key={field.key}
                 field={field}
                 isSelected={isSelected}
+                isBelowThreshold={isBelowThreshold}
                 onSelect={() => onFieldSelect(isSelected ? null : field.key)}
+                onValueChange={(value) => onFieldValueChange(field.key, value, field)}
                 isHovered={isHovered}
                 onHover={handleHover}
               />
@@ -2464,8 +2626,9 @@ function ExtractionSection({
               key={field.key}
               field={field}
               isSelected={isSelected}
-              isBelowThreshold={false}
+              isBelowThreshold={isBelowThreshold}
               onSelect={() => onFieldSelect(isSelected ? null : field.key)}
+              onValueChange={(value) => onFieldValueChange(field.key, value, field)}
               isHovered={isHovered}
               onHover={handleHover}
             />
@@ -2497,6 +2660,334 @@ function isObjectField(field: ExtractionFieldResult): boolean {
   return typeof val === "object" && val !== null && !Array.isArray(val);
 }
 
+function isImageLikeField(field: ExtractionFieldResult): boolean {
+  const key = (field.key || "").toLowerCase();
+  const label = (field.label || "").toLowerCase();
+  return /(image|figure|chart|visual|logo|photo|diagram)/.test(key) || /(image|figure|chart|visual|logo|photo|diagram)/.test(label);
+}
+
+function fieldConfidencePercent(field: ExtractionFieldResult): number {
+  const value = Number(field.confidence);
+  return Math.round((Number.isFinite(value) ? value : 0) * 100);
+}
+
+function isFieldEdited(field: ExtractionFieldResult): boolean {
+  return JSON.stringify(field.value) !== JSON.stringify(field.raw_value);
+}
+
+function setResultDataValue(data: Record<string, unknown>, fieldKey: string, value: unknown): Record<string, unknown> {
+  if (!fieldKey.includes(".")) {
+    return { ...data, [fieldKey]: value };
+  }
+  const parts = fieldKey.split(".").filter(Boolean);
+  if (parts.length === 0) return data;
+  const root = { ...data };
+  let cursor: Record<string, unknown> = root;
+  for (const part of parts.slice(0, -1)) {
+    const current = cursor[part];
+    const next = typeof current === "object" && current !== null && !Array.isArray(current)
+      ? { ...(current as Record<string, unknown>) }
+      : {};
+    cursor[part] = next;
+    cursor = next;
+  }
+  cursor[parts[parts.length - 1]] = value;
+  return root;
+}
+
+function parseScalarEdit(value: string, field: ExtractionFieldResult): unknown {
+  if (field.type === "number" || field.type === "currency") {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : value;
+  }
+  if (field.type === "boolean") {
+    return value === "true";
+  }
+  return value;
+}
+
+function FieldStatusLine({
+  field,
+  isBelowThreshold,
+}: {
+  field: ExtractionFieldResult;
+  isBelowThreshold: boolean;
+}) {
+  const confidence = fieldConfidencePercent(field);
+  const edited = isFieldEdited(field);
+  return (
+    <div className="flex flex-wrap items-center gap-1.5">
+      <span
+        className={cn(
+          "rounded-md border px-1.5 py-0.5 font-mono text-[10px] font-bold tabular-nums",
+          isBelowThreshold
+            ? "border-amber-500/30 bg-amber-500/10 text-amber-700 dark:text-amber-300"
+            : confidence >= 85
+            ? "border-emerald-500/20 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300"
+            : "border-slate-500/20 bg-slate-500/10 text-slate-600 dark:text-slate-300",
+        )}
+      >
+        {confidence}%
+      </span>
+      {edited ? (
+        <span className="inline-flex items-center gap-1 rounded-md border border-blue-500/20 bg-blue-500/10 px-1.5 py-0.5 text-[10px] font-semibold text-blue-700 dark:text-blue-300">
+          <Pencil className="size-3" />
+          Edited
+        </span>
+      ) : null}
+      {!field.valid ? (
+        <span className="rounded-md border border-rose-500/20 bg-rose-500/10 px-1.5 py-0.5 text-[10px] font-semibold text-rose-700 dark:text-rose-300">
+          Invalid
+        </span>
+      ) : null}
+    </div>
+  );
+}
+
+function FieldEvidenceChips({
+  field,
+  onSelect,
+}: {
+  field: ExtractionFieldResult;
+  onSelect: () => void;
+}) {
+  const evidence = field.evidence.slice(0, 2);
+  if (evidence.length === 0) {
+    return (
+      <span className="text-[11px] text-muted-foreground">
+        No source citation
+      </span>
+    );
+  }
+  return (
+    <div className="flex flex-wrap items-center gap-1.5">
+      {evidence.map((item, index) => (
+        <button
+          key={`${item.chunk_id}-${index}`}
+          type="button"
+          onClick={(event) => {
+            event.stopPropagation();
+            onSelect();
+          }}
+          className="inline-flex max-w-full items-center gap-1 rounded-md border border-violet-500/20 bg-violet-500/10 px-2 py-1 text-[11px] font-medium text-violet-700 transition hover:bg-violet-500/15 dark:text-violet-300"
+          title={item.text_preview || item.chunk_id}
+        >
+          <MapPin className="size-3" />
+          <span>Page {item.page}</span>
+          <span className="max-w-[180px] truncate text-muted-foreground">{item.type}</span>
+        </button>
+      ))}
+    </div>
+  );
+}
+
+type ImageRef = { url: string; label?: string };
+
+function ImagePreviewGrid({ images }: { images: ImageRef[] }) {
+  if (images.length === 0) return null;
+  return (
+    <div className="grid gap-2 sm:grid-cols-2">
+      {images.slice(0, 6).map((image, index) => (
+        <a
+          key={`${image.url}-${index}`}
+          href={parserBenchmarksApi.assetUrl(image.url)}
+          target="_blank"
+          rel="noreferrer"
+          className="group overflow-hidden rounded-lg border border-border/70 bg-background shadow-2xs"
+          onClick={(event) => event.stopPropagation()}
+          title={image.label || image.url}
+        >
+          <img
+            src={parserBenchmarksApi.assetUrl(image.url)}
+            alt={image.label || `Extracted image ${index + 1}`}
+            className="h-40 w-full object-contain bg-muted/30 transition-transform group-hover:scale-[1.01]"
+            loading="lazy"
+          />
+          <div className="truncate border-t border-border/60 px-2 py-1.5 text-[11px] text-muted-foreground">
+            {image.label || image.url.split("/").pop() || "Image evidence"}
+          </div>
+        </a>
+      ))}
+    </div>
+  );
+}
+
+function FieldEvidenceImages({ field }: { field: ExtractionFieldResult }) {
+  const images = field.evidence
+    .flatMap((item) => [
+      ...(item.source_url ? [{ url: item.source_url, label: `Page ${item.page} ${item.type}` }] : []),
+      ...imageRefsFromValue(item.text_preview).map((image) => ({
+        ...image,
+        label: image.label || `Page ${item.page} ${item.type}`,
+      })),
+    ]);
+  return <ImagePreviewGrid images={dedupeImages(images)} />;
+}
+
+function ValueWithImage({ value, compact = false }: { value: unknown; compact?: boolean }) {
+  const images = imageRefsFromValue(value);
+  if (images.length === 0) {
+    return <span>{formatFieldValue(value)}</span>;
+  }
+  if (compact) {
+    return (
+      <div className="min-w-[120px] space-y-1">
+        <img
+          src={parserBenchmarksApi.assetUrl(images[0].url)}
+          alt={images[0].label || "Extracted image"}
+          className="h-20 w-28 rounded-md border border-border bg-muted/30 object-contain"
+          loading="lazy"
+        />
+        <span className="block max-w-[160px] truncate text-[11px] text-muted-foreground">
+          {images[0].label || images[0].url.split("/").pop()}
+        </span>
+      </div>
+    );
+  }
+  return <ImagePreviewGrid images={images} />;
+}
+
+function imageRefsFromValue(value: unknown): ImageRef[] {
+  if (value == null) return [];
+  if (typeof value === "string") return imageRefsFromText(value);
+  if (Array.isArray(value)) return dedupeImages(value.flatMap((item) => imageRefsFromValue(item)));
+  if (typeof value === "object") {
+    const raw = value as Record<string, unknown>;
+    const direct = raw.url ?? raw.source_url ?? raw.image_url ?? raw.imageUrl ?? raw.src;
+    const caption = raw.caption ?? raw.label ?? raw.title ?? raw.description;
+    const refs = typeof direct === "string" ? [{ url: direct, label: typeof caption === "string" ? caption : undefined }] : [];
+    return dedupeImages([...refs, ...Object.values(raw).flatMap((item) => imageRefsFromValue(item))]);
+  }
+  return [];
+}
+
+function imageRefsFromText(text: string): ImageRef[] {
+  const refs: ImageRef[] = [];
+  const markdownRe = /!\[([^\]]*)]\(([^)]+)\)/g;
+  for (const match of text.matchAll(markdownRe)) {
+    refs.push({ url: match[2], label: match[1] || undefined });
+  }
+  const urlRe = /(\/api\/parser-benchmarks\/media\/[^\s),"'<>]+|https?:\/\/[^\s),"'<>]+\.(?:png|jpe?g|gif|webp|bmp|svg)|data:image\/[a-zA-Z0-9.+-]+;base64,[A-Za-z0-9+/=]+)/g;
+  for (const match of text.matchAll(urlRe)) {
+    refs.push({ url: match[1] });
+  }
+  return dedupeImages(refs);
+}
+
+function dedupeImages(images: ImageRef[]): ImageRef[] {
+  const seen = new Set<string>();
+  const out: ImageRef[] = [];
+  for (const image of images) {
+    if (!image.url || seen.has(image.url)) continue;
+    seen.add(image.url);
+    out.push(image);
+  }
+  return out;
+}
+
+function EditableScalarValue({
+  field,
+  multiline = false,
+  onValueChange,
+}: {
+  field: ExtractionFieldResult;
+  multiline?: boolean;
+  onValueChange: (value: unknown) => void;
+}) {
+  const value = field.value == null ? "" : String(field.value);
+  const imageRefs = isImageLikeField(field) ? imageRefsFromValue(field.value) : [];
+  if (field.type === "boolean") {
+    return (
+      <Select
+        value={String(Boolean(field.value))}
+        onValueChange={(next) => onValueChange(next === "true")}
+      >
+        <SelectTrigger className="h-9 max-w-[180px] bg-background text-sm" onClick={(event) => event.stopPropagation()}>
+          <SelectValue />
+        </SelectTrigger>
+        <SelectContent>
+          <SelectItem value="true">Yes</SelectItem>
+          <SelectItem value="false">No</SelectItem>
+        </SelectContent>
+      </Select>
+    );
+  }
+  if (multiline) {
+    return (
+      <div className="space-y-2">
+        <Textarea
+          value={value}
+          onClick={(event) => event.stopPropagation()}
+          onChange={(event) => onValueChange(parseScalarEdit(event.target.value, field))}
+          className="min-h-24 rounded-xl border-amber-500/30 bg-amber-500/[0.04] text-sm leading-relaxed"
+        />
+        <ImagePreviewGrid images={imageRefs} />
+      </div>
+    );
+  }
+  return (
+    <div className="space-y-2">
+      <Input
+        value={value}
+        type={field.type === "number" || field.type === "currency" ? "number" : "text"}
+        onClick={(event) => event.stopPropagation()}
+        onChange={(event) => onValueChange(parseScalarEdit(event.target.value, field))}
+        className="h-9 bg-background text-sm font-semibold"
+      />
+      <ImagePreviewGrid images={imageRefs} />
+    </div>
+  );
+}
+
+function EditableJsonValue({
+  field,
+  onValueChange,
+}: {
+  field: ExtractionFieldResult;
+  onValueChange: (value: unknown) => void;
+}) {
+  const [draft, setDraft] = React.useState(() => JSON.stringify(field.value, null, 2));
+  const [error, setError] = React.useState<string | null>(null);
+
+  React.useEffect(() => {
+    setDraft(JSON.stringify(field.value, null, 2));
+    setError(null);
+  }, [field.value]);
+
+  return (
+    <div className="space-y-1.5">
+      <Textarea
+        value={draft}
+        onClick={(event) => event.stopPropagation()}
+        onChange={(event) => {
+          const next = event.target.value;
+          setDraft(next);
+          try {
+            JSON.parse(next);
+            setError(null);
+          } catch {
+            setError("Invalid JSON");
+          }
+        }}
+        onBlur={() => {
+          try {
+            const parsed = JSON.parse(draft);
+            setError(null);
+            onValueChange(parsed);
+          } catch {
+            setError("Invalid JSON");
+          }
+        }}
+        className="min-h-36 font-mono text-xs leading-5"
+        spellCheck={false}
+      />
+      <p className={cn("text-[11px]", error ? "text-destructive" : "text-muted-foreground")}>
+        {error ?? "Edit JSON to correct structured extraction data."}
+      </p>
+    </div>
+  );
+}
+
 /**
  * Shadcn/Aceternity style row field: clean two-column layout with subtle hover states,
  * or callout card for narrative/analytical blocks.
@@ -2506,6 +2997,7 @@ function ExtractionRowField({
   isSelected,
   isBelowThreshold,
   onSelect,
+  onValueChange,
   isHovered,
   onHover,
 }: {
@@ -2513,6 +3005,7 @@ function ExtractionRowField({
   isSelected: boolean;
   isBelowThreshold: boolean;
   onSelect: () => void;
+  onValueChange: (value: unknown) => void;
   isHovered: boolean;
   onHover: (hovered: boolean) => void;
 }) {
@@ -2523,42 +3016,41 @@ function ExtractionRowField({
     /basis|rationale|driver|summary|description|note|comment|review|analysis|narrative/i.test(field.key);
 
   return (
-    <button
+    <div
       id={`field-card-${field.key}`}
-      type="button"
       onClick={onSelect}
       onMouseEnter={() => onHover(true)}
       onMouseLeave={() => onHover(false)}
       className={cn(
-        "flex w-full items-baseline gap-4 border-b border-border/30 py-3.5 text-left transition-all duration-150 hover:bg-muted/20 rounded-lg px-2 scroll-mt-2",
+        "flex w-full items-start gap-4 border-b border-border/30 py-3.5 text-left transition-all duration-150 hover:bg-muted/20 rounded-lg px-2 scroll-mt-2",
         isSelected && "bg-muted/40 shadow-2xs ring-1 ring-violet-500/20",
+        isBelowThreshold && "border-amber-500/30 bg-amber-500/[0.06] ring-1 ring-amber-500/20",
         isHovered && !isSelected && "bg-muted/10",
       )}
+      role="button"
+      tabIndex={0}
     >
       {/* Field name label */}
-      <div className="flex min-w-0 shrink-0 items-center gap-2" style={{ width: "30%" }}>
-        <span className="truncate font-mono text-[11px] font-bold uppercase tracking-wider text-muted-foreground">
-          {fieldLabel}
-        </span>
-        {field.required ? (
-          <span className="shrink-0 rounded-md border border-violet-500/20 bg-violet-500/10 px-1.5 py-0.5 text-[9px] font-mono font-bold uppercase text-violet-600 dark:text-violet-400">
-            REQUIRED
+      <div className="min-w-0 shrink-0 space-y-2" style={{ width: "30%" }}>
+        <div className="flex min-w-0 items-center gap-2">
+          <span className="truncate font-mono text-[11px] font-bold uppercase tracking-wider text-muted-foreground">
+            {fieldLabel}
           </span>
-        ) : null}
+          {field.required ? (
+            <span className="shrink-0 rounded-md border border-violet-500/20 bg-violet-500/10 px-1.5 py-0.5 text-[9px] font-mono font-bold uppercase text-violet-600 dark:text-violet-400">
+              REQUIRED
+            </span>
+          ) : null}
+        </div>
+        <FieldStatusLine field={field} isBelowThreshold={isBelowThreshold} />
       </div>
       {/* Value */}
-      <div className="min-w-0 flex-1">
-        {displayValue === "—" ? (
-          <span className="text-sm font-medium text-muted-foreground">N/A</span>
-        ) : isNarrativeBlock ? (
-          <div className="rounded-xl border border-amber-500/30 bg-amber-500/[0.04] p-4 text-sm font-normal leading-relaxed text-foreground shadow-2xs dark:border-amber-500/20">
-            {displayValue}
-          </div>
-        ) : (
-          <span className="text-sm font-semibold text-foreground">{displayValue}</span>
-        )}
+      <div className="min-w-0 flex-1 space-y-2">
+        <EditableScalarValue field={field} multiline={isNarrativeBlock} onValueChange={onValueChange} />
+        <FieldEvidenceImages field={field} />
+        <FieldEvidenceChips field={field} onSelect={onSelect} />
       </div>
-    </button>
+    </div>
   );
 }
 
@@ -2569,13 +3061,17 @@ function ExtractionRowField({
 function ExtractionObjectField({
   field,
   isSelected,
+  isBelowThreshold,
   onSelect,
+  onValueChange,
   isHovered,
   onHover,
 }: {
   field: ExtractionFieldResult;
   isSelected: boolean;
+  isBelowThreshold: boolean;
   onSelect: () => void;
+  onValueChange: (value: unknown) => void;
   isHovered: boolean;
   onHover: (hovered: boolean) => void;
 }) {
@@ -2591,6 +3087,7 @@ function ExtractionObjectField({
       className={cn(
         "border-b border-border/30 py-4 px-2 rounded-xl transition-all duration-150 cursor-pointer scroll-mt-2",
         isSelected && "bg-muted/40 ring-1 ring-violet-500/20",
+        isBelowThreshold && "border-amber-500/30 bg-amber-500/[0.06] ring-1 ring-amber-500/20",
         isHovered && !isSelected && "bg-muted/10",
       )}
     >
@@ -2604,6 +3101,7 @@ function ExtractionObjectField({
               REQUIRED
             </span>
           ) : null}
+          <FieldStatusLine field={field} isBelowThreshold={isBelowThreshold} />
         </div>
       </div>
       <div className="rounded-xl border border-border/60 bg-card/40 p-4 shadow-2xs backdrop-blur-sm space-y-4">
@@ -2611,6 +3109,15 @@ function ExtractionObjectField({
           <ExtractionObjectValue key={k} label={k} value={v} />
         ))}
       </div>
+      <div className="mt-3">
+        <FieldEvidenceImages field={field} />
+        <FieldEvidenceChips field={field} onSelect={onSelect} />
+      </div>
+      {isSelected ? (
+        <div className="mt-3">
+          <EditableJsonValue field={field} onValueChange={onValueChange} />
+        </div>
+      ) : null}
     </div>
   );
 }
@@ -2636,12 +3143,12 @@ function ExtractionObjectValue({ label, value }: { label: string; value: unknown
           <span className="font-mono text-[11px] font-bold text-muted-foreground tracking-wider">{displayLabel}</span>
           <div className="flex flex-wrap gap-1.5 pt-0.5">
             {value.map((item, i) => (
-              <span
+              <div
                 key={i}
                 className="rounded-lg border border-border/60 bg-muted/50 px-2.5 py-1 text-xs font-medium text-foreground shadow-2xs hover:bg-muted/80 transition-colors"
               >
-                {String(item)}
-              </span>
+                <ValueWithImage value={item} />
+              </div>
             ))}
           </div>
         </div>
@@ -2671,7 +3178,7 @@ function ExtractionObjectValue({ label, value }: { label: string; value: unknown
                   <tr key={ri} className="transition-colors hover:bg-muted/20">
                     {columns.map((col) => (
                       <td key={col} className="px-3.5 py-2.5 text-xs font-medium text-foreground">
-                        {formatFieldValue(r[col])}
+                        <ValueWithImage value={r[col]} compact />
                       </td>
                     ))}
                   </tr>
@@ -2704,7 +3211,9 @@ function ExtractionObjectValue({ label, value }: { label: string; value: unknown
   return (
     <div className="flex items-baseline justify-between gap-4 py-2 border-b border-border/20 last:border-0">
       <span className="font-mono text-[11px] font-medium text-muted-foreground">{displayLabel}</span>
-      <span className="text-sm font-semibold text-foreground text-right">{formatFieldValue(value)}</span>
+      <span className="text-sm font-semibold text-foreground text-right">
+        <ValueWithImage value={value} />
+      </span>
     </div>
   );
 }
@@ -2718,6 +3227,7 @@ function ExtractionTableField({
   isSelected,
   isBelowThreshold,
   onSelect,
+  onValueChange,
   isHovered,
   onHover,
 }: {
@@ -2725,6 +3235,7 @@ function ExtractionTableField({
   isSelected: boolean;
   isBelowThreshold: boolean;
   onSelect: () => void;
+  onValueChange: (value: unknown) => void;
   isHovered: boolean;
   onHover: (hovered: boolean) => void;
 }) {
@@ -2736,6 +3247,7 @@ function ExtractionTableField({
         isSelected={isSelected}
         isBelowThreshold={isBelowThreshold}
         onSelect={onSelect}
+        onValueChange={onValueChange}
         isHovered={isHovered}
         onHover={onHover}
       />
@@ -2755,6 +3267,7 @@ function ExtractionTableField({
       className={cn(
         "border-b border-border/30 py-4 px-2 rounded-xl transition-all duration-150 cursor-pointer scroll-mt-2",
         isSelected && "bg-muted/40 ring-1 ring-violet-500/20",
+        isBelowThreshold && "border-amber-500/30 bg-amber-500/[0.06] ring-1 ring-amber-500/20",
         isHovered && !isSelected && "bg-muted/10",
       )}
     >
@@ -2768,6 +3281,7 @@ function ExtractionTableField({
               REQUIRED
             </span>
           ) : null}
+          <FieldStatusLine field={field} isBelowThreshold={isBelowThreshold} />
         </div>
       </div>
       <div className="overflow-hidden rounded-xl border border-border/60 bg-card/40 shadow-2xs backdrop-blur-sm">
@@ -2797,7 +3311,7 @@ function ExtractionTableField({
                 <tr key={rowIdx} className="transition-colors hover:bg-muted/30">
                   {columns.map((col) => (
                     <td key={col} className="px-4 py-3 text-sm font-medium text-foreground/90">
-                      {formatFieldValue(row[col])}
+                      <ValueWithImage value={row[col]} compact />
                     </td>
                   ))}
                 </tr>
@@ -2806,6 +3320,15 @@ function ExtractionTableField({
           </table>
         </div>
       </div>
+      <div className="mt-3">
+        <FieldEvidenceImages field={field} />
+        <FieldEvidenceChips field={field} onSelect={onSelect} />
+      </div>
+      {isSelected ? (
+        <div className="mt-3">
+          <EditableJsonValue field={field} onValueChange={onValueChange} />
+        </div>
+      ) : null}
     </div>
   );
 }
@@ -2817,13 +3340,17 @@ function ExtractionTableField({
 function ExtractionListField({
   field,
   isSelected,
+  isBelowThreshold,
   onSelect,
+  onValueChange,
   isHovered,
   onHover,
 }: {
   field: ExtractionFieldResult;
   isSelected: boolean;
+  isBelowThreshold: boolean;
   onSelect: () => void;
+  onValueChange: (value: unknown) => void;
   isHovered: boolean;
   onHover: (hovered: boolean) => void;
 }) {
@@ -2839,6 +3366,7 @@ function ExtractionListField({
       className={cn(
         "border-b border-border/30 py-4 px-2 rounded-xl transition-all duration-150 cursor-pointer scroll-mt-2",
         isSelected && "bg-muted/40 ring-1 ring-violet-500/20",
+        isBelowThreshold && "border-amber-500/30 bg-amber-500/[0.06] ring-1 ring-amber-500/20",
         isHovered && !isSelected && "bg-muted/10",
       )}
     >
@@ -2852,6 +3380,7 @@ function ExtractionListField({
               REQUIRED
             </span>
           ) : null}
+          <FieldStatusLine field={field} isBelowThreshold={isBelowThreshold} />
         </div>
       </div>
       <div className="grid gap-2.5">
@@ -2863,10 +3392,21 @@ function ExtractionListField({
             <span className="flex size-6 shrink-0 items-center justify-center rounded-lg border border-border/60 bg-muted/60 font-mono text-xs font-bold text-muted-foreground group-hover:bg-primary/10 group-hover:text-primary transition-colors">
               {idx + 1}
             </span>
-            <span className="min-w-0 flex-1 pt-0.5 font-normal text-foreground/90">{String(item)}</span>
+            <span className="min-w-0 flex-1 pt-0.5 font-normal text-foreground/90">
+              <ValueWithImage value={item} />
+            </span>
           </div>
         ))}
       </div>
+      <div className="mt-3">
+        <FieldEvidenceImages field={field} />
+        <FieldEvidenceChips field={field} onSelect={onSelect} />
+      </div>
+      {isSelected ? (
+        <div className="mt-3">
+          <EditableJsonValue field={field} onValueChange={onValueChange} />
+        </div>
+      ) : null}
     </div>
   );
 }
@@ -2957,19 +3497,28 @@ function EvidenceDocumentViewer({
   );
   const previewUrl = parserBenchmarksApi.previewUrl(input.id);
 
-  const pageChunks = chunks.filter((chunk) => chunk.page === boundedPage && chunk.bbox);
+  const pageChunks = chunks.filter((chunk) => chunk.page === boundedPage);
   const pageBounds = React.useMemo(() => {
-    let maxX = 1;
-    let maxY = 1;
-    for (const chunk of pageChunks) {
-      if (!chunk.bbox) continue;
+    let maxX = 612;
+    let maxY = 792;
+    for (const chunk of chunks) {
+      if (chunk.page !== boundedPage || !chunk.bbox) continue;
       const x1 = chunk.bbox.x1 ?? chunk.bbox.right ?? chunk.bbox.width ?? 0;
       const bottom = chunk.bbox.bottom ?? chunk.bbox.y1 ?? chunk.bbox.height ?? 0;
-      maxX = Math.max(maxX, Number(x1));
-      maxY = Math.max(maxY, Number(bottom));
+      if (Number(x1) > 50) maxX = Math.max(maxX, Number(x1));
+      if (Number(bottom) > 50) maxY = Math.max(maxY, Number(bottom));
+    }
+    for (const field of fields) {
+      for (const ev of field.evidence) {
+        if (ev.page !== boundedPage || !ev.bbox) continue;
+        const x1 = ev.bbox.x1 ?? ev.bbox.right ?? ev.bbox.width ?? 0;
+        const bottom = ev.bbox.bottom ?? ev.bbox.y1 ?? ev.bbox.height ?? 0;
+        if (Number(x1) > 50) maxX = Math.max(maxX, Number(x1));
+        if (Number(bottom) > 50) maxY = Math.max(maxY, Number(bottom));
+      }
     }
     return { width: maxX, height: maxY };
-  }, [pageChunks]);
+  }, [chunks, fields, boundedPage]);
 
   const highlightedChunkIds = React.useMemo(() => {
     if (!selectedFieldKey) return new Set<string>();
@@ -2985,43 +3534,92 @@ function EvidenceDocumentViewer({
     return new Set(field.evidence.map((e) => e.chunk_id));
   }, [hoveredFieldKey, fields]);
 
-  const bboxOverlays = pageChunks.map((chunk) => {
-    if (!chunk.bbox) return null;
-    const x0 = Number(chunk.bbox.x0 ?? chunk.bbox.left ?? 0);
-    const top = Number(chunk.bbox.top ?? chunk.bbox.y0 ?? 0);
-    const x1 = Number(chunk.bbox.x1 ?? chunk.bbox.right ?? chunk.bbox.width ?? 0);
-    const bottom = Number(chunk.bbox.bottom ?? chunk.bbox.y1 ?? chunk.bbox.height ?? 0);
-    const leftPct = (x0 / pageBounds.width) * 100;
-    const topPct = (top / pageBounds.height) * 100;
-    const widthPct = ((x1 - x0) / pageBounds.width) * 100;
-    const heightPct = ((bottom - top) / pageBounds.height) * 100;
-    const isHighlighted = highlightedChunkIds.has(chunk.id);
-    const isHovered = hoveredChunkIds.has(chunk.id);
-    const fieldUsingChunk = fields.find((f) => f.evidence.some((e) => e.chunk_id === chunk.id));
-    return {
-      chunkId: chunk.id,
-      fieldKey: fieldUsingChunk?.key ?? null,
-      fieldLabel: fieldUsingChunk?.label ?? fieldUsingChunk?.key ?? null,
-      fieldValue: fieldUsingChunk ? formatFieldValue(fieldUsingChunk.value) : "",
-      leftPct: Math.max(0, leftPct),
-      topPct: Math.max(0, topPct),
-      widthPct: Math.max(0.5, widthPct),
-      heightPct: Math.max(0.5, heightPct),
-      isHighlighted,
-      isHovered,
-    };
-  }).filter(Boolean) as Array<{
-    chunkId: string;
-    fieldKey: string | null;
-    fieldLabel: string | null;
-    fieldValue: string;
-    leftPct: number;
-    topPct: number;
-    widthPct: number;
-    heightPct: number;
-    isHighlighted: boolean;
-    isHovered: boolean;
-  }>;
+  const bboxOverlays = React.useMemo(() => {
+    const overlays: Array<{
+      id: string;
+      chunkId: string;
+      fieldKey: string | null;
+      fieldLabel: string | null;
+      fieldValue: string;
+      leftPct: number;
+      topPct: number;
+      widthPct: number;
+      heightPct: number;
+      isHighlighted: boolean;
+      isHovered: boolean;
+    }> = [];
+
+    const seenBoxes = new Set<string>();
+
+    for (const field of fields) {
+      for (const [idx, ev] of field.evidence.entries()) {
+        if (ev.page !== boundedPage) continue;
+        const chunk = chunks.find((c) => c.id === ev.chunk_id);
+        const bbox = ev.bbox || chunk?.bbox;
+        if (!bbox) continue;
+
+        const x0 = Number(bbox.x0 ?? bbox.left ?? 0);
+        const top = Number(bbox.top ?? bbox.y0 ?? 0);
+        const x1 = Number(bbox.x1 ?? bbox.right ?? bbox.width ?? 0);
+        const bottom = Number(bbox.bottom ?? bbox.y1 ?? bbox.height ?? 0);
+
+        const leftPct = (x0 / pageBounds.width) * 100;
+        const topPct = (top / pageBounds.height) * 100;
+        const widthPct = ((x1 - x0) / pageBounds.width) * 100;
+        const heightPct = ((bottom - top) / pageBounds.height) * 100;
+
+        const isHighlighted = selectedFieldKey === field.key || highlightedChunkIds.has(ev.chunk_id);
+        const isHovered = hoveredFieldKey === field.key || hoveredChunkIds.has(ev.chunk_id);
+
+        overlays.push({
+          id: `${field.key}-ev-${idx}`,
+          chunkId: ev.chunk_id,
+          fieldKey: field.key,
+          fieldLabel: field.label || field.key,
+          fieldValue: formatFieldValue(field.value),
+          leftPct: Math.max(0, leftPct),
+          topPct: Math.max(0, topPct),
+          widthPct: Math.max(0.5, widthPct),
+          heightPct: Math.max(0.5, heightPct),
+          isHighlighted,
+          isHovered,
+        });
+        seenBoxes.add(ev.chunk_id);
+      }
+    }
+
+    for (const chunk of pageChunks) {
+      if (!chunk.bbox || seenBoxes.has(chunk.id)) continue;
+      const x0 = Number(chunk.bbox.x0 ?? chunk.bbox.left ?? 0);
+      const top = Number(chunk.bbox.top ?? chunk.bbox.y0 ?? 0);
+      const x1 = Number(chunk.bbox.x1 ?? chunk.bbox.right ?? chunk.bbox.width ?? 0);
+      const bottom = Number(chunk.bbox.bottom ?? chunk.bbox.y1 ?? chunk.bbox.height ?? 0);
+      const leftPct = (x0 / pageBounds.width) * 100;
+      const topPct = (top / pageBounds.height) * 100;
+      const widthPct = ((x1 - x0) / pageBounds.width) * 100;
+      const heightPct = ((bottom - top) / pageBounds.height) * 100;
+
+      const isHighlighted = highlightedChunkIds.has(chunk.id);
+      const isHovered = hoveredChunkIds.has(chunk.id);
+      const fieldUsingChunk = fields.find((f) => f.evidence.some((e) => e.chunk_id === chunk.id));
+
+      overlays.push({
+        id: `chunk-${chunk.id}`,
+        chunkId: chunk.id,
+        fieldKey: fieldUsingChunk?.key ?? null,
+        fieldLabel: fieldUsingChunk?.label ?? fieldUsingChunk?.key ?? null,
+        fieldValue: fieldUsingChunk ? formatFieldValue(fieldUsingChunk.value) : "",
+        leftPct: Math.max(0, leftPct),
+        topPct: Math.max(0, topPct),
+        widthPct: Math.max(0.5, widthPct),
+        heightPct: Math.max(0.5, heightPct),
+        isHighlighted,
+        isHovered,
+      });
+    }
+
+    return overlays;
+  }, [fields, boundedPage, pageChunks, pageBounds, selectedFieldKey, hoveredFieldKey, highlightedChunkIds, hoveredChunkIds]);
 
   function handleFullscreen() {
     window.open(previewUrl, "_blank", "noopener,noreferrer");
@@ -3123,7 +3721,7 @@ function EvidenceDocumentViewer({
                   const showTooltip = overlay.isHighlighted || overlay.isHovered;
                   return (
                     <div
-                      key={overlay.chunkId}
+                      key={overlay.id}
                       className="absolute pointer-events-none"
                       style={{
                         left: `${overlay.leftPct}%`,
@@ -3244,7 +3842,7 @@ function UnifiedReport({ result }: { result: ExtractionRunResponse }) {
         </div>
       )}
 
-      <div className="grid gap-3 md:grid-cols-4 xl:grid-cols-6">
+      <div className="grid gap-3 md:grid-cols-4 xl:grid-cols-7">
         <div className="rounded-lg border border-border bg-muted/20 p-3">
           <p className="text-xs text-muted-foreground">Schema</p>
           <p className="truncate text-sm font-semibold">{result.schema_definition.name}</p>
@@ -3254,8 +3852,27 @@ function UnifiedReport({ result }: { result: ExtractionRunResponse }) {
           <p className="truncate text-sm font-semibold">{result.parser_name}</p>
         </div>
         <div className="rounded-lg border border-border bg-muted/20 p-3">
-          <p className="text-xs text-muted-foreground">Evidence</p>
-          <p className="text-sm font-semibold">{result.evidence_mode === "llm_vlm" ? "LLM/VLM" : "Cleaner"}</p>
+          <p className="text-xs text-muted-foreground">Tier</p>
+          <p className="truncate text-sm font-semibold">{result.extraction_tier === "agentic" ? "Agentic" : "Cost effective"}</p>
+        </div>
+        <div className="rounded-lg border border-border bg-muted/20 p-3">
+          <p className="text-xs text-muted-foreground">Retrieval</p>
+          <p className="truncate text-sm font-semibold">
+            {result.stats.retrieval_mode === "full_pipeline"
+              ? "Hybrid RRF"
+              : result.stats.retrieval_mode === "dense_only"
+              ? "Dense Only"
+              : result.stats.retrieval_mode === "bm25_only"
+              ? "BM25 Only"
+              : result.stats.retrieval_mode === "fts_fallback"
+              ? "FTS Fallback"
+              : result.stats.retrieval_mode === "in_memory"
+              ? "In-Memory"
+              : result.stats.retrieval_mode}
+          </p>
+          <p className="text-[10px] text-muted-foreground mt-0.5 truncate">
+            {result.stats.dense_hits} dense / {result.stats.sparse_hits} BM25
+          </p>
         </div>
         <div className="rounded-lg border border-border bg-muted/20 p-3">
           <p className="text-xs text-muted-foreground">Validated</p>
@@ -3407,7 +4024,6 @@ function fullResultPayload(result: ExtractionRunResponse) {
     parser_name: result.parser_name,
     parser_run_id: result.parser_run_id,
     parser_run_started_at: result.parser_run_started_at,
-    evidence_mode: result.evidence_mode,
     extraction_tier: result.extraction_tier,
     schema_model_name: result.schema_model_name,
     schema_definition: result.schema_definition,
@@ -3526,6 +4142,7 @@ function ExtractedField({ field }: { field: ExtractionFieldResult }) {
       {field.evidence.length > 0 ? (
         <div className="mt-3 border-t border-border/70 pt-3">
           <p className="mb-1 text-xs font-medium uppercase tracking-wide text-muted-foreground">Evidence</p>
+          <FieldEvidenceImages field={field} />
           {field.evidence.slice(0, 2).map((item) => (
             <p key={item.chunk_id} className="text-xs leading-5 text-muted-foreground">
               Page {item.page}: {item.text_preview}
@@ -3553,7 +4170,6 @@ function CodePanel({
     max_pages: 20,
     max_candidates_per_field: 8,
     preview_chars: 8000,
-    evidence_mode: "cleaner",
     extraction_tier: "cost_effective",
   };
   return (
@@ -3608,6 +4224,10 @@ function renderValue(value: unknown): React.ReactNode {
   if (value == null || value === "") {
     return <p className="text-sm text-muted-foreground">N/A</p>;
   }
+  const images = imageRefsFromValue(value);
+  if (images.length > 0) {
+    return <ImagePreviewGrid images={images} />;
+  }
   if (Array.isArray(value)) {
     if (value.length > 0 && value.every((item) => item && typeof item === "object" && !Array.isArray(item))) {
       const rows = value as Record<string, unknown>[];
@@ -3628,8 +4248,8 @@ function renderValue(value: unknown): React.ReactNode {
               {rows.slice(0, 30).map((row, rowIndex) => (
                 <TableRow key={rowIndex}>
                   {columns.map((column) => (
-                    <TableCell key={column} className="max-w-[260px] truncate text-sm">
-                      {String(row[column] ?? "")}
+                    <TableCell key={column} className="max-w-[260px] text-sm">
+                      <ValueWithImage value={row[column]} compact />
                     </TableCell>
                   ))}
                 </TableRow>
@@ -3642,7 +4262,9 @@ function renderValue(value: unknown): React.ReactNode {
     return (
       <ul className="list-inside list-disc space-y-1 text-sm">
         {value.map((item, index) => (
-          <li key={index}>{String(item)}</li>
+          <li key={index}>
+            <ValueWithImage value={item} />
+          </li>
         ))}
       </ul>
     );
@@ -3653,7 +4275,9 @@ function renderValue(value: unknown): React.ReactNode {
         {Object.entries(value as Record<string, unknown>).map(([key, item]) => (
           <div key={key} className="rounded-md border border-border bg-muted/20 px-3 py-2">
             <dt className="font-mono text-xs text-muted-foreground">{key}</dt>
-            <dd className="mt-1 text-sm">{String(item ?? "N/A")}</dd>
+            <dd className="mt-1 text-sm">
+              <ValueWithImage value={item} />
+            </dd>
           </div>
         ))}
       </dl>
@@ -3792,4 +4416,235 @@ function pythonType(type: ExtractionFieldType) {
 
 function escapePython(value: string) {
   return value.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+}
+
+interface HistoryTabProps {
+  onLoadResult: (runId: string) => Promise<void>;
+  onDeleteResult: (runId: string) => void;
+}
+
+function HistoryTab({ onLoadResult, onDeleteResult }: HistoryTabProps) {
+  const [searchQuery, setSearchQuery] = React.useState("");
+  const [isV2, setIsV2] = React.useState(true);
+
+  const historyQ = useQuery({
+    queryKey: ["extraction-lab-history"],
+    queryFn: () => extractionLabApi.history(),
+    refetchInterval: 3000,
+  });
+
+  const jobs = historyQ.data ?? [];
+
+  const filteredJobs = React.useMemo(() => {
+    return jobs.filter((job) => {
+      const q = searchQuery.toLowerCase().trim();
+      if (!q) return true;
+      return job.job_id.toLowerCase().includes(q) || job.filename.toLowerCase().includes(q);
+    });
+  }, [jobs, searchQuery]);
+
+  const copyToClipboard = (text: string) => {
+    navigator.clipboard.writeText(text);
+    toast.success("Copied to clipboard", { description: text });
+  };
+
+  return (
+    <div className="space-y-4">
+      <div className="flex flex-wrap items-center justify-between gap-4 rounded-xl border border-border/50 bg-card p-4 shadow-sm">
+        <div className="flex flex-1 min-w-[280px] max-w-md items-center gap-2">
+          <div className="relative w-full">
+            <Search className="absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
+            <Input
+              placeholder="Job ID (exact match)"
+              value={searchQuery}
+              onChange={(e) => setSearchQuery(e.target.value)}
+              className="pl-9 h-9 w-full bg-background"
+            />
+          </div>
+        </div>
+
+        <div className="flex items-center gap-2">
+          <Button variant="outline" size="sm" className="h-9 gap-1.5 text-muted-foreground">
+            <Calendar className="size-4" />
+            <span>Pick date</span>
+          </Button>
+          <span className="text-muted-foreground/40 font-light">-</span>
+          <Button variant="outline" size="sm" className="h-9 gap-1.5 text-muted-foreground">
+            <Calendar className="size-4" />
+            <span>Pick date</span>
+          </Button>
+
+          <Button variant="outline" size="sm" className="h-9 text-muted-foreground">
+            Columns
+          </Button>
+
+          <Button variant="outline" size="sm" className="h-9 text-muted-foreground">
+            Local time
+          </Button>
+
+          <div className="flex items-center gap-2 pl-2 border-l border-border/80">
+            <span className="text-xs font-semibold text-muted-foreground uppercase tracking-wider">V2</span>
+            <Switch
+              checked={isV2}
+              onCheckedChange={setIsV2}
+              aria-label="V2 Mode Toggle"
+            />
+          </div>
+        </div>
+      </div>
+
+      <div className="rounded-xl border border-border/50 bg-card shadow-sm overflow-hidden">
+        <div className="overflow-x-auto">
+          <Table>
+            <TableHeader>
+              <TableRow className="hover:bg-transparent bg-muted/30">
+                <TableHead className="py-3.5 font-semibold text-foreground">Name</TableHead>
+                <TableHead className="py-3.5 font-semibold text-foreground">Status</TableHead>
+                <TableHead className="py-3.5 font-semibold text-foreground">Tier</TableHead>
+                <TableHead className="py-3.5 font-semibold text-foreground">Queue</TableHead>
+                <TableHead className="py-3.5 font-semibold text-foreground">Processing</TableHead>
+                <TableHead className="py-3.5 font-semibold text-foreground">Total</TableHead>
+                <TableHead className="py-3.5 font-semibold text-foreground">ID</TableHead>
+                <TableHead className="py-3.5 font-semibold text-foreground">Created</TableHead>
+                <TableHead className="py-3.5 font-semibold text-foreground text-center">Results</TableHead>
+                <TableHead className="py-3.5 w-10" />
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {historyQ.isLoading ? (
+                <TableRow>
+                  <TableCell colSpan={10} className="h-32 text-center text-muted-foreground">
+                    <div className="flex flex-col items-center justify-center gap-2">
+                      <div className="size-5 animate-spin rounded-full border-2 border-primary border-t-transparent" />
+                      <span>Loading extraction history...</span>
+                    </div>
+                  </TableCell>
+                </TableRow>
+              ) : filteredJobs.length === 0 ? (
+                <TableRow>
+                  <TableCell colSpan={10} className="h-32 text-center text-muted-foreground">
+                    No extraction jobs found.
+                  </TableCell>
+                </TableRow>
+              ) : (
+                filteredJobs.map((job) => {
+                  const running = job.status === "RUNNING";
+                  const failed = job.status === "FAILED";
+                  const success = job.status === "SUCCESS";
+
+                  return (
+                    <TableRow key={job.job_id} className="hover:bg-muted/30">
+                      <TableCell className="py-3.5 font-semibold text-foreground max-w-xs truncate">
+                        {job.filename}
+                      </TableCell>
+                      <TableCell className="py-3.5">
+                        <span className="inline-flex items-center gap-1.5">
+                          <span
+                            className={cn(
+                              "size-2 rounded-full",
+                              success && "bg-emerald-500 animate-pulse",
+                              running && "bg-blue-500 animate-spin border border-t-transparent border-blue-200",
+                              failed && "bg-rose-500"
+                            )}
+                          />
+                          <span
+                            className={cn(
+                              "text-xs font-semibold tracking-wide uppercase",
+                              success && "text-emerald-600 dark:text-emerald-400",
+                              running && "text-blue-600 dark:text-blue-400",
+                              failed && "text-rose-600 dark:text-rose-400"
+                            )}
+                          >
+                            {job.status}
+                          </span>
+                        </span>
+                      </TableCell>
+                      <TableCell className="py-3.5 font-medium">
+                        <span
+                          className={cn(
+                            "inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium",
+                            job.tier === "Agentic"
+                              ? "bg-violet-100 text-violet-800 dark:bg-violet-900/40 dark:text-violet-300"
+                              : "bg-slate-100 text-slate-800 dark:bg-slate-900/40 dark:text-slate-300"
+                          )}
+                        >
+                          {job.tier}
+                        </span>
+                      </TableCell>
+                      <TableCell className="py-3.5 text-muted-foreground font-mono text-xs tabular-nums">
+                        {job.queue_time}
+                      </TableCell>
+                      <TableCell className="py-3.5 text-muted-foreground font-mono text-xs tabular-nums">
+                        {running ? "-" : job.processing_time}
+                      </TableCell>
+                      <TableCell className="py-3.5 text-muted-foreground font-mono text-xs tabular-nums">
+                        {running ? "-" : job.total_time}
+                      </TableCell>
+                      <TableCell className="py-3.5 font-mono text-xs text-muted-foreground">
+                        <div className="flex items-center gap-1">
+                          <span className="truncate max-w-[80px]">{job.job_id}</span>
+                          <button
+                            onClick={() => copyToClipboard(job.job_id)}
+                            className="p-1 hover:bg-muted rounded text-muted-foreground hover:text-foreground transition-colors"
+                            title="Copy Job ID"
+                          >
+                            <Copy className="size-3" />
+                          </button>
+                        </div>
+                      </TableCell>
+                      <TableCell className="py-3.5 text-muted-foreground text-xs font-medium">
+                        {job.created_at}
+                      </TableCell>
+                      <TableCell className="py-3.5 text-center">
+                        {job.result_run_id ? (
+                          <Button
+                            variant="link"
+                            size="sm"
+                            onClick={() => onLoadResult(job.job_id)}
+                            className="h-auto p-0 font-semibold text-primary hover:underline"
+                          >
+                            Results
+                          </Button>
+                        ) : (
+                          <span className="text-xs text-muted-foreground italic">
+                            {running ? "Extracting..." : "No results"}
+                          </span>
+                        )}
+                      </TableCell>
+                      <TableCell className="py-3.5 text-right">
+                        <DropdownMenu>
+                          <DropdownMenuTrigger asChild>
+                            <Button variant="ghost" size="icon" className="size-8">
+                              <MoreVertical className="size-4" />
+                            </Button>
+                          </DropdownMenuTrigger>
+                          <DropdownMenuContent align="end" className="w-36">
+                            {job.result_run_id && (
+                              <DropdownMenuItem
+                                onClick={() => onLoadResult(job.job_id)}
+                                className="cursor-pointer gap-2"
+                              >
+                                View Results
+                              </DropdownMenuItem>
+                            )}
+                            <DropdownMenuItem
+                              onClick={() => onDeleteResult(job.job_id)}
+                              className="cursor-pointer text-destructive focus:text-destructive gap-2 focus:bg-destructive/10"
+                            >
+                              <Trash2 className="size-3.5" />
+                              Delete Job
+                            </DropdownMenuItem>
+                          </DropdownMenuContent>
+                        </DropdownMenu>
+                      </TableCell>
+                    </TableRow>
+                  );
+                })
+              )}
+            </TableBody>
+          </Table>
+        </div>
+      </div>
+    </div>
+  );
 }

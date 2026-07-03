@@ -338,7 +338,6 @@ export interface ExtractionRunRequest {
   max_pages: number;
   max_candidates_per_field: number;
   preview_chars: number;
-  evidence_mode: "cleaner" | "llm_vlm";
   extraction_tier: "cost_effective" | "agentic" | "agentic_plus";
 }
 
@@ -377,6 +376,7 @@ export interface ExtractionEvidence {
   type: string;
   text_preview: string;
   bbox: Record<string, number> | null;
+  source_url?: string | null;
 }
 
 export interface ExtractionChunk {
@@ -427,6 +427,9 @@ export interface ExtractionRunStats {
   candidates_scanned: number;
   chunking_strategy: string;
   chunk_tokens: number;
+  retrieval_mode: string;
+  dense_hits: number;
+  sparse_hits: number;
   cleaned_evidence_used: boolean;
   cleaned_evidence_items: number;
   llm_reconstruction_used: boolean;
@@ -449,7 +452,6 @@ export interface ExtractionRunResponse {
   parser_name: string;
   parser_run_id: string | null;
   parser_run_started_at: string | null;
-  evidence_mode: "cleaner" | "llm_vlm";
   extraction_tier: "cost_effective" | "agentic" | "agentic_plus";
   schema_model_name: string;
   schema_definition: ExtractionLabSchema;
@@ -501,4 +503,17 @@ export interface BatchProcessingResult {
 export interface BatchApplyRequest {
   template_id: string;
   document_ids: string[];
+}
+
+
+export interface JobHistoryItem {
+  job_id: string;
+  filename: string;
+  status: "PENDING" | "RUNNING" | "SUCCESS" | "FAILED";
+  tier: "Cost Effective" | "Agentic";
+  queue_time: string;
+  processing_time: string;
+  total_time: string;
+  created_at: string;
+  result_run_id?: string | null;
 }

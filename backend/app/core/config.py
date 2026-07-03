@@ -1,10 +1,11 @@
-﻿"""Application configuration.
+"""Application configuration.
 
 Centralised settings for the FastAPI service. Values can be overridden via
 environment variables when running in production.
 """
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -37,8 +38,6 @@ class Settings(BaseSettings):
 
     # Database (Postgres + pgvector).  Leave empty to use in-memory fallback.
     database_url: str = ""
-    embedding_model_name: str = "sentence-transformers/all-mpnet-base-v2"
-    embedding_device: str = "cpu"
 
     # Optional PDF-Extract-Kit adapter. Keep this external because the kit has
     # separate heavyweight dependencies and model weights.
@@ -119,3 +118,43 @@ class Settings(BaseSettings):
 
 
 settings = Settings()
+
+
+def _read_env_file_value(path: Path, name: str) -> str:
+    if not path.exists():
+        return ""
+    prefix = f"{name}="
+    alt_prefix = f"EXTRACT_{name}="
+    for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        if stripped.startswith(prefix):
+            return stripped.split("=", 1)[1].strip().strip('"').strip("'")
+        if stripped.startswith(alt_prefix):
+            return stripped.split("=", 1)[1].strip().strip('"').strip("'")
+    return ""
+
+
+def runtime_env_value(name: str) -> str:
+    direct = os.getenv(name, "").strip()
+    if direct:
+        return direct
+    prefixed = os.getenv(f"EXTRACT_{name}", "").strip()
+    if prefixed:
+        return prefixed
+    for env_path in (ROOT_DIR / ".env", BASE_DIR / ".env"):
+        value = _read_env_file_value(env_path, name)
+        if value:
+            return value
+    return ""
+
+
+def hydrate_runtime_env(keys: tuple[str, ...] = ("OPENAI_API_KEY", "GOOGLE_API_KEY", "GEMINI_API_KEY")) -> None:
+    for key in keys:
+        value = runtime_env_value(key)
+        if value:
+            os.environ.setdefault(key, value)
+
+
+hydrate_runtime_env()

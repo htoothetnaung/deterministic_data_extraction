@@ -24,11 +24,6 @@ class ExtractionFieldType(str, Enum):
     OBJECT = "object"
 
 
-class ExtractionEvidenceMode(str, Enum):
-    CLEANER = "cleaner"
-    LLM_VLM = "llm_vlm"
-
-
 class ExtractionTier(str, Enum):
     COST_EFFECTIVE = "cost_effective"
     AGENTIC = "agentic"
@@ -75,7 +70,6 @@ class ExtractionRunRequest(BaseModel):
     max_pages: int = Field(default=50, ge=1, le=500)
     max_candidates_per_field: int = Field(default=8, ge=1, le=25)
     preview_chars: int = Field(default=6000, ge=1000, le=20000)
-    evidence_mode: ExtractionEvidenceMode = ExtractionEvidenceMode.CLEANER
     extraction_tier: ExtractionTier = ExtractionTier.COST_EFFECTIVE
 
 
@@ -117,6 +111,7 @@ class ExtractionEvidence(BaseModel):
     type: str
     text_preview: str
     bbox: Optional[dict[str, float]] = None
+    source_url: Optional[str] = None
 
 
 class ExtractionChunk(BaseModel):
@@ -167,6 +162,11 @@ class ExtractionRunStats(BaseModel):
     candidates_scanned: int
     chunking_strategy: str = "page"
     chunk_tokens: int = 0
+    # Retrieval mode: "full_pipeline" (dense + BM25), "bm25_only", "dense_only", or "fts_fallback".
+    retrieval_mode: str = "unknown"
+    dense_hits: int = 0
+    sparse_hits: int = 0
+    # Deprecated — kept for backwards compatibility with older cached results.
     cleaned_evidence_used: bool = False
     cleaned_evidence_items: int = 0
     llm_reconstruction_used: bool = False
@@ -189,7 +189,6 @@ class ExtractionRunResponse(BaseModel):
     parser_name: str
     parser_run_id: Optional[str] = None
     parser_run_started_at: Optional[datetime] = None
-    evidence_mode: ExtractionEvidenceMode = ExtractionEvidenceMode.CLEANER
     extraction_tier: ExtractionTier = ExtractionTier.COST_EFFECTIVE
     schema_model_name: str
     schema_definition: dict[str, Any]
@@ -211,3 +210,15 @@ class ExtractionReportRequest(BaseModel):
 
 class ExtractionReportResponse(BaseModel):
     report_markdown: str
+
+
+class JobHistoryItem(BaseModel):
+    job_id: str
+    filename: str
+    status: str  # PENDING | RUNNING | SUCCESS | FAILED
+    tier: str    # Cost Effective | Agentic
+    queue_time: str
+    processing_time: str
+    total_time: str
+    created_at: str
+    result_run_id: Optional[str] = None

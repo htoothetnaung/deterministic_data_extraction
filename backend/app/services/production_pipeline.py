@@ -1,6 +1,7 @@
 """DB-backed document processing stages for production cases."""
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 from typing import Any
 
@@ -12,10 +13,15 @@ from app.db.repositories.document_repo import DocumentRepository
 from app.db.repositories.evidence_repo import EvidenceRepository
 from app.models.parser_benchmark import ParserRunResult, ParserStatus
 from app.services import document_parser
-from app.services.artifact_store import ArtifactStore
+from app.services import evidence_cleaner
+from app.services.chunk_indexer import index_chunks
+from app.services.chunker import ChunkConfig, ChunkStrategy, chunk_parser_result
 from app.services.embedding import embed_texts
-from app.services.evidence_cleaner import clean_parser_result
 from app.services.parsers.orchestrator import PARSERS
+
+logger = logging.getLogger(__name__)
+
+DEFAULT_PRODUCTION_STRATEGY: ChunkStrategy = "page"
 
 
 DEEP_PARSE_ORDER = ["mistral_ocr", "paddleocr_vl_vllm", "layout_pdfplumber", "docling", "pdfplumber", "pymupdf", "pypdf"]
@@ -57,15 +63,74 @@ async def deep_parse_document(session: AsyncSession, document_id: str, parser_id
         raise ValueError(f"Document has no storage_path: {document_id}")
 
     result_parser_id, result = _run_parser(Path(doc.storage_path), parser_id)
-    cleaned = clean_parser_result(result)
-    ArtifactStore().store_parse_output(doc.case_id, doc.document_id, result_parser_id, result, cleaned)
+    logger.info(
+        "deep_parse_document: parser=%s pages=%d chars=%d tables=%d images=%d",
+        result_parser_id, result.pages or 0, result.chars or 0,
+        result.tables or 0, result.images or 0,
+    )
 
+    # Store raw parser output for audit (no cleaner pass — chunks go direct).
     page_map = await _insert_pages(session, doc, result)
-    evidence_repo = EvidenceRepository(session)
-    for item in cleaned.get("items", []) if isinstance(cleaned, dict) else []:
-        if isinstance(item, dict):
-            page_id = page_map.get(int(item.get("page") or 1))
-            await evidence_repo.create_from_clean_evidence(doc.case_id, doc.document_id, page_id, item)
+
+    # Evidence cleaner: normalize parser output (tables, images, text) into
+    # structured evidence items before indexing. Falls back to raw chunker
+    # output when the parser is not supported by the cleaner.
+    cleaned = evidence_cleaner.clean_parser_result(result, max_pages=result.pages or 200)
+    if cleaned.get("enabled") and cleaned.get("items"):
+        logger.info(
+            "deep_parse_document: cleaner enabled, items=%d",
+            len(cleaned["items"]),
+        )
+        chunk_dicts = cleaned["items"]
+        stats = await index_chunks(
+            session,
+            doc.case_id,
+            doc.document_id,
+            _clean_items_to_chunks(chunk_dicts),
+            embed_openai=True,
+            embed_api=False,
+            replace_existing=True,
+        )
+        logger.info(
+            "deep_parse_document: indexed %d cleaned evidence items (cleaner=%s), "
+            "openai_embeddings=%d, skipped_empty=%d",
+            stats.chunks_indexed,
+            cleaned.get("strategy", "unknown"),
+            stats.openai_embeddings,
+            stats.skipped_empty,
+        )
+    else:
+        logger.info(
+            "deep_parse_document: cleaner disabled, reason=%s, falling back to raw chunker",
+            cleaned.get("reason", "unknown"),
+        )
+        chunks = chunk_parser_result(
+            result,
+            strategy=DEFAULT_PRODUCTION_STRATEGY,
+            config=ChunkConfig(max_pages=200),
+        )
+        logger.info(
+            "deep_parse_document: document_id=%s parser=%s pages=%d chunks=%d (cleaner disabled, fallback to raw chunker)",
+            document_id,
+            result_parser_id,
+            result.pages or 1,
+            len(chunks),
+        )
+        stats = await index_chunks(
+            session,
+            doc.case_id,
+            doc.document_id,
+            chunks,
+            embed_openai=True,
+            embed_api=False,
+            replace_existing=True,
+        )
+        logger.info(
+            "deep_parse_document: indexed %d chunks, openai_embeddings=%d, skipped_empty=%d",
+            stats.chunks_indexed,
+            stats.openai_embeddings,
+            stats.skipped_empty,
+        )
 
     parse_quality = _quality_from_result(result)
     await repo.update_parser_status(
@@ -193,3 +258,39 @@ def _priority_for_type(document_type: str) -> int:
         "proxy_form": 50,
     }.get(document_type, 10)
 
+
+def _clean_items_to_chunks(items: list[dict[str, Any]]) -> list[Chunk]:
+    """Convert evidence_cleaner CleanEvidence dicts to Chunk objects for indexing."""
+    from app.services.chunker import Chunk as _Chunk
+
+    chunks: list[Chunk] = []
+    for item in items:
+        text = str(item.get("text") or "").strip()
+        item_type = str(item.get("type") or "text").lower()
+        rows = item.get("rows")
+        if not text and item_type != "image" and not (isinstance(rows, list) and rows):
+            continue
+        if isinstance(rows, list) and rows and not text:
+            text = "table evidence"
+        chunks.append(
+            _Chunk(
+                chunk_id=str(item.get("id") or ""),
+                page=int(item.get("page") or 1),
+                chunk_type=item_type,
+                text=text or "image evidence",
+                bbox=item.get("bbox") if isinstance(item.get("bbox"), dict) else None,
+                confidence=item.get("confidence") if isinstance(item.get("confidence"), (int, float)) else None,
+                risk=str(item.get("risk") or "normal"),
+                warnings=list(item.get("warnings") or []),
+                source_url=(item.get("provenance") or {}).get("url") if isinstance(item.get("provenance"), dict) else None,
+                columns=list(item.get("columns")) if isinstance(item.get("columns"), list) else None,
+                rows=list(rows) if isinstance(rows, list) else None,
+                table_index=item.get("table_index"),
+                row_index=item.get("row_index"),
+                header=list(item.get("header")) if isinstance(item.get("header"), list) else None,
+                token_count=item.get("token_count"),
+                strategy="block",
+                metadata=item.get("provenance") if isinstance(item.get("provenance"), dict) else {},
+            )
+        )
+    return chunks

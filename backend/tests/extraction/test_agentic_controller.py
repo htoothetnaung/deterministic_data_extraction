@@ -1,7 +1,9 @@
 from __future__ import annotations
 
-from app.extraction.agentic_controller import ConsistencyReport, critic_issues, detect_conflict
-from app.services.embedding import GEMINI_EMBEDDING_DIM
+from app.extraction.agentic_controller import AgenticFieldExtractor, ConsistencyReport, critic_issues, detect_conflict
+from app.extraction.field_extractor import FieldExtractor
+from app.services.embedding import OPENAI_EMBEDDING_DIM
+from app.services.production_extraction import _extractor_for_mode
 
 
 def test_agentic_consistency_report_scores_penalties():
@@ -22,5 +24,16 @@ def test_cross_field_accounting_critic_flags_mismatch():
     assert "accounting_mismatch:assets_vs_liabilities_plus_equity" in issues
 
 
-def test_gemini_embedding_dim_is_3072():
-    assert GEMINI_EMBEDDING_DIM == 3072
+def test_openai_embedding_dim_is_1536():
+    assert OPENAI_EMBEDDING_DIM == 1536
+
+
+def test_extractor_for_mode_non_agentic_returns_field_extractor():
+    extractor = _extractor_for_mode(agentic=False)
+    assert isinstance(extractor, FieldExtractor)
+    assert not isinstance(extractor, AgenticFieldExtractor)
+
+
+def test_extractor_for_mode_agentic_returns_agentic_field_extractor():
+    extractor = _extractor_for_mode(agentic=True)
+    assert isinstance(extractor, AgenticFieldExtractor)

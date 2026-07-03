@@ -103,7 +103,6 @@ def embed_texts(texts: list[str]) -> list[list[float]]:
         vectors = embed_texts_openai(texts, input_type="document")
         if vectors:
             return vectors
-    # Local fallback (offline dev / no key).
     model = _local_model()
     vectors = model.encode(texts, normalize_embeddings=True, show_progress_bar=False)
     return [vector.tolist() for vector in vectors]

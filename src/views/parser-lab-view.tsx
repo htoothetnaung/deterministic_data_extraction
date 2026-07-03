@@ -857,14 +857,18 @@ export function ParserLabView() {
   }, [bestMatchingRun, runsQ.data, selectedInputId, selectedRunId]);
 
   React.useEffect(() => {
-    if (!selectedInput || compatible.length === 0) {
+    if (!selectedInput) {
       setSelectedParserIds((current) => (current.length === 0 ? current : []));
       return;
     }
+    const defaultParserIds = compatible.some((p) => p.id === "mistral_ocr")
+      ? ["mistral_ocr"]
+      : [];
+    const defaultKey = defaultParserIds.join("|");
     setSelectedParserIds((current) =>
-      current.join("|") === compatibleParserKey ? current : compatibleParserIds,
+      current.join("|") === defaultKey ? current : defaultParserIds,
     );
-  }, [compatible.length, compatibleParserIds, compatibleParserKey, selectedInput]);
+  }, [compatible, selectedInput]);
 
   const runMut = useMutation({
     onMutate: () => {

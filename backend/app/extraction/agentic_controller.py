@@ -7,9 +7,14 @@ import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
 from typing import Any
+import logging
 
+logger = logging.getLogger(__name__)
+
+from app.core.config import runtime_env_value
 from app.extraction.evidence_pack import EvidencePack
 from app.extraction.field_extractor import ExtractedCandidate, FieldExtractor
+from app.extraction.prompts import SINGLE_FIELD_LLM_PROMPT
 
 GEMINI_FLASH_MODEL = "gemini-2.5-flash"
 OPENAI_EXTRACTION_MODEL = "gpt-5-mini"
@@ -73,23 +78,31 @@ class AgenticFieldExtractor:
         self.adk_available = _adk_available()
 
     def extract(self, field_path: str, field_schema: dict, pack: EvidencePack) -> list[ExtractedCandidate]:
-        # 1. OpenAI LLM extraction is the primary path (LLM-first), mirroring
-        #    the in-memory Extraction Lab engine.
+        logger.debug("agentic: openai_candidate field=%s", field_path)
         candidate = _openai_candidate(field_path, field_schema, pack, OPENAI_EXTRACTION_MODEL)
         if candidate:
+            logger.info("agentic: openai_candidate field=%s success=True", field_path)
             return [candidate]
-        # 2. Deterministic rule extractor (offline / no-key fallback).
+        logger.debug("agentic: openai_candidate field=%s success=False, falling back to deterministic", field_path)
         candidates = self.rule_extractor.extract(field_path, field_schema, pack)
         if candidates:
+            logger.info("agentic: deterministic field=%s candidates=%d", field_path, len(candidates))
             return candidates
-        # 3. Gemini Flash fallback.
+        logger.debug("agentic: deterministic field=%s empty, falling back to gemini", field_path)
         candidate = _gemini_candidate(field_path, field_schema, pack, self.model_name)
-        return [candidate] if candidate else []
+        if candidate:
+            logger.info("agentic: gemini field=%s success=True", field_path)
+            return [candidate]
+        logger.warning("agentic: all_tiers_failed field=%s", field_path)
+        return []
 
 
 def detect_conflict(candidate_values: list[Any]) -> bool:
     normalized = {" ".join(str(value).strip().lower().split()) for value in candidate_values if value is not None}
-    return len(normalized) > 1
+    conflict = len(normalized) > 1
+    if conflict:
+        logger.info("agentic: conflict_detected values=%d", len(candidate_values))
+    return conflict
 
 
 def critic_issues(final_json: dict[str, Any], required_fields: set[str]) -> list[str]:
@@ -121,8 +134,9 @@ def _openai_candidate(
     API and asks for a strict-JSON value. Returns ``None`` when unavailable so
     the caller falls back to the deterministic extractor. Never raises.
     """
-    api_key = os.getenv("OPENAI_API_KEY", "").strip()
+    api_key = runtime_env_value("OPENAI_API_KEY")
     if not api_key:
+        logger.debug("agentic: openai_candidate field=%s reason=no_api_key", field_path)
         return None
     evidence = [
         {
@@ -133,6 +147,7 @@ def _openai_candidate(
         for item in [*pack.tables, *pack.text_snippets]
     ]
     if not evidence:
+        logger.debug("agentic: openai_candidate field=%s reason=empty_evidence", field_path)
         return None
     prompt = {
         "field": {
@@ -143,13 +158,7 @@ def _openai_candidate(
             "required": bool(field_schema.get("required")),
         },
         "evidence": evidence,
-        "instructions": (
-            "Extract the value for this single field from the supplied evidence only. "
-            "Do not invent values; use null if absent. Numbers as JSON numbers, dates as "
-            "ISO YYYY-MM-DD when inferable, booleans as true/false. "
-            'Return strict JSON: {"value": any|null, "confidence": number 0..1, '
-            '"evidence_ids": [string], "rationale": string}.'
-        ),
+        "instructions": SINGLE_FIELD_LLM_PROMPT,
     }
     body = json.dumps(
         {
@@ -172,11 +181,13 @@ def _openai_candidate(
     try:
         with urllib.request.urlopen(request, timeout=60, context=_openai_ssl_context()) as response:
             payload = json.loads(response.read().decode("utf-8"))
-    except Exception:
+    except Exception as e:
+        logger.warning("agentic: openai_candidate field=%s failed: %s", field_path, e)
         return None
     parsed = _extract_response_payload(payload)
     value = parsed.get("value")
     if _missing(value):
+        logger.debug("agentic: openai_candidate field=%s reason=missing_value", field_path)
         return None
     confidence = parsed.get("confidence")
     evidence_ids = parsed.get("evidence_ids")
@@ -208,12 +219,14 @@ def _gemini_candidate(
     pack: EvidencePack,
     model_name: str,
 ) -> ExtractedCandidate | None:
-    api_key = os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY")
+    api_key = runtime_env_value("GOOGLE_API_KEY") or runtime_env_value("GEMINI_API_KEY")
     if not api_key:
+        logger.debug("agentic: gemini_candidate field=%s reason=no_api_key", field_path)
         return None
     try:
         from google import genai
     except ImportError:
+        logger.debug("agentic: gemini_candidate field=%s reason=genai_not_installed", field_path)
         return None
 
     evidence = [
@@ -225,6 +238,7 @@ def _gemini_candidate(
         for item in [*pack.tables, *pack.text_snippets]
     ]
     if not evidence:
+        logger.debug("agentic: gemini_candidate field=%s reason=empty_evidence", field_path)
         return None
     prompt = {
         "field_path": field_path,
@@ -238,7 +252,8 @@ def _gemini_candidate(
             contents=json.dumps(prompt, ensure_ascii=False),
         )
         payload = _parse_json(getattr(response, "text", "") or "")
-    except Exception:
+    except Exception as e:
+        logger.warning("agentic: gemini_candidate field=%s failed: %s", field_path, e)
         return None
     value = payload.get("value")
     if _missing(value):

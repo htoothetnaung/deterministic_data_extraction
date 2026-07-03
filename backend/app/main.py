@@ -5,11 +5,21 @@ Run with:
 """
 from __future__ import annotations
 
+import logging
+import os
+
 from fastapi import FastAPI
 
 from app.core.config import settings
 from app.core.cors import add_cors
 from app.api.router import api_router
+
+_log_level = os.getenv("LOG_LEVEL", "WARNING").upper()
+logging.basicConfig(
+    level=getattr(logging, _log_level, logging.WARNING),
+    format="%(asctime)s [%(name)s] %(levelname)s %(message)s",
+    datefmt="%Y-%m-%dT%H:%M:%S",
+)
 
 app = FastAPI(
     title=settings.app_name,

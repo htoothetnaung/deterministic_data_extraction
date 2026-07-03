@@ -11,6 +11,8 @@ import re
 from dataclasses import dataclass
 from html.parser import HTMLParser
 from typing import Any
+import logging
+logger = logging.getLogger(__name__)
 
 from app.models.parser_benchmark import ParserRunResult, ParserStatus
 from app.services.parsers.base import preview_text
@@ -83,6 +85,7 @@ def clean_parser_result(result: ParserRunResult, max_pages: int | None = None) -
     """Return normalized evidence for parsers currently approved for cleanup."""
     parser_id = result.library
     if parser_id not in SUPPORTED_CLEANUP_PARSERS or result.status != ParserStatus.OK:
+        logger.info("evidence_cleaner: disabled parser=%s reason=unsupported_or_failed", parser_id)
         return {
             "enabled": False,
             "parser_id": parser_id,
@@ -101,15 +104,21 @@ def clean_parser_result(result: ParserRunResult, max_pages: int | None = None) -
             if item and (max_pages is None or item.page <= max_pages):
                 items.append(item)
 
+    logger.info("evidence_cleaner: parsed_blocks blocks=%d items=%d", len(blocks) if isinstance(blocks, list) else 0, len(items))
+
     raw_text = result.raw_text or result.text_preview
     # OCR/VLM parsers often produce one large markdown block per page. Recover
     # tables and image references from markdown/html when structured metadata is
     # sparse.
-    for item in [*_tables_from_raw_text(parser_id, raw_text), *_images_from_raw_text(parser_id, raw_text)]:
+    tables_from_raw = _tables_from_raw_text(parser_id, raw_text)
+    images_from_raw = _images_from_raw_text(parser_id, raw_text)
+    logger.info("evidence_cleaner: recovered_raw tables=%d images=%d", len(tables_from_raw), len(images_from_raw))
+    for item in [*tables_from_raw, *images_from_raw]:
         if max_pages is None or item.page <= max_pages:
             items.append(item)
 
     items = _dedupe_items(items)
+    logger.info("evidence_cleaner: after_dedup items=%d", len(items))
     pages = sorted({item.page for item in items})
     stats = {
         "items": len(items),
@@ -119,6 +128,7 @@ def clean_parser_result(result: ParserRunResult, max_pages: int | None = None) -
         "financial_risk_items": sum(1 for item in items if item.risk == "financial_review"),
         "pages": pages[:200],
     }
+    logger.info("evidence_cleaner: enabled parser=%s items=%d tables=%d text_blocks=%d images=%d", parser_id, stats['items'], stats['tables'], stats['text_blocks'], stats['images'])
     return {
         "enabled": True,
         "parser_id": parser_id,
@@ -318,7 +328,8 @@ def _html_tables(text: str) -> list[tuple[list[str], list[dict[str, str]], str]]
     parser = _TableHTMLParser()
     try:
         parser.feed(text)
-    except Exception:
+    except Exception as e:
+        logger.debug("evidence_cleaner: html_table_parse failed: %s", e)
         return []
     output: list[tuple[list[str], list[dict[str, str]], str]] = []
     for table in parser.tables:
@@ -406,6 +417,7 @@ def _parse_markdown_table(text: str) -> tuple[list[str], list[dict[str, str]], s
         if row and not all(re.fullmatch(r":?-{3,}:?", cell or "") for cell in row)
     ]
     if len(rows) < 2:
+        logger.debug("evidence_cleaner: markdown_table_parse rows=%d reason=too_few_rows", len(rows))
         return None
     width = max(len(row) for row in rows)
     rows = [row + [""] * (width - len(row)) for row in rows]

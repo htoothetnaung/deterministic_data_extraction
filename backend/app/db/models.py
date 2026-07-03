@@ -169,6 +169,8 @@ class EvidenceEmbeddingModel(Base):
     #   ALTER TABLE evidence_embeddings ALTER COLUMN embedding TYPE vector(1536);
     # before starting the service.
     embedding = mapped_column(Vector(1536), nullable=False)
+    # Legacy optional API vector column; kept schema-compatible at 1536 dims.
+    # Runtime dense retrieval reads/writes only ``embedding``.
     embedding_api = mapped_column(Vector(3072), nullable=True)
 
     evidence_item = relationship("EvidenceItemModel", back_populates="embedding")

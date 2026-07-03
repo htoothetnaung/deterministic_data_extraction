@@ -24,7 +24,10 @@ import time
 import urllib.error
 import urllib.request
 import uuid
+import logging
 from dataclasses import dataclass
+
+logger = logging.getLogger(__name__)
 from datetime import date, datetime
 from pathlib import Path
 from typing import Any, Optional, Union, get_args, get_origin
@@ -37,12 +40,13 @@ from pydantic import ConfigDict, Field as PydanticField, ValidationError, create
 from app.db.models import EvidenceItemModel
 from app.db.repositories.case_repo import CaseRepository
 from app.db.repositories.document_repo import DocumentRepository
+from app.core.config import runtime_env_value
 from app.models.document import utcnow
 from app.models.extraction import ExtractionRequest, ExtractionResult
+from app.extraction.prompts import SINGLE_FIELD_LLM_PROMPT, SCHEMA_GENERATION_SYSTEM_PROMPT
 from app.models.extraction_lab import (
     ExtractionChunk,
     ExtractionEvidence,
-    ExtractionEvidenceMode,
     ExtractionFieldResult,
     ExtractionFieldType,
     ExtractionLabSchema,
@@ -64,6 +68,7 @@ from app.services.parsers.base import ok_result, preview_text, resolve_input
 from app.services.parsers.orchestrator import PARSERS
 from app.services.parsers.persistence import get_latest_ok_result_for_input
 from app.services.chunk_indexer import index_chunks
+from app.services import evidence_cleaner
 from app.services.chunker import (
     DEFAULT_STRATEGY as DEFAULT_CHUNK_STRATEGY,
     Chunk,
@@ -120,7 +125,7 @@ TYPE_PATTERNS: dict[ExtractionFieldType, re.Pattern[str]] = {
     ExtractionFieldType.NUMBER: re.compile(r"(?<![\w.-])-?\d+(?:,\d{3})*(?:\.\d+)?(?![\w.-])"),
     ExtractionFieldType.BOOLEAN: re.compile(r"\b(?:true|false|yes|no|pass|fail|approved|rejected|compliant|non-compliant)\b", re.I),
 }
-
+    
 
 def list_schema_templates() -> list[ExtractionLabSchemaTemplate]:
     schema_dir = Path(__file__).resolve().parents[3] / "data" / "extraction_schemas"
@@ -147,9 +152,9 @@ def list_schema_templates() -> list[ExtractionLabSchemaTemplate]:
 
 def generate_schema_definition(payload: SchemaGenerationRequest) -> SchemaGenerationResponse:
     query = (payload.natural_language_query or "").strip()
-    input_ids = list(dict.fromkeys(payload.input_ids))
-    if not query and not input_ids:
-        raise HTTPException(status_code=400, detail="Provide a prompt, selected documents, or both")
+    input_ids = list(dict.fromkeys(payload.input_ids))[:1]
+    if not input_ids:
+        raise HTTPException(status_code=400, detail="Select at least one parsed document before generating a schema")
 
     warnings: list[str] = []
     evidence: list[dict[str, Any]] = []
@@ -189,12 +194,18 @@ def generate_schema_definition(payload: SchemaGenerationRequest) -> SchemaGenera
                     "rows": (chunk.rows or [])[:5],
                 }
             )
+    if not evidence:
+        detail = "; ".join(warnings) if warnings else "No parser evidence was available"
+        raise HTTPException(
+            status_code=422,
+            detail=f"Schema generation requires parser output from the selected document(s). {detail}",
+        )
 
     api_key = _openai_api_key()
     if api_key:
         schema = _call_openai_schema_generator(api_key, query, evidence, payload.multi_document_mode)
     else:
-        warnings.append("OPENAI_API_KEY is not set; generated a deterministic draft from the prompt and document headings.")
+        warnings.append("OPENAI_API_KEY is not set; generated a deterministic draft from parser evidence only.")
         schema = _fallback_schema_from_context(query, evidence)
     return SchemaGenerationResponse(schema_definition=schema, warnings=warnings)
 
@@ -247,7 +258,6 @@ def run_extraction(payload: ExtractionRunRequest) -> ExtractionRunResponse:
     started_at = utcnow()
     parser_id, parser_name, parser_result, parser_run_started_at = _load_parser_result(payload)
     chunks = _build_chunks(parser_result, payload.max_pages, payload)
-    cleaned_evidence_count = sum(1 for chunk in chunks if chunk.id.startswith("chk-") or chunk.id.startswith("cev-"))
     chunking_strategy_used = chunks[0].strategy if chunks else payload.chunking_strategy
     if not chunks:
         chunks = [
@@ -260,14 +270,6 @@ def run_extraction(payload: ExtractionRunRequest) -> ExtractionRunResponse:
         ]
 
     search_schema = _schema_with_query(payload.output_schema, payload.natural_language_query)
-
-    llm_reconstruction_items = 0
-    if payload.evidence_mode == ExtractionEvidenceMode.LLM_VLM:
-        chunks, llm_reconstruction_items = _reconstruct_relevant_evidence(
-            search_schema,
-            chunks,
-            payload.max_candidates_per_field,
-        )
 
     data: dict[str, Any] = {}
     field_results: list[ExtractionFieldResult] = []
@@ -315,14 +317,13 @@ def run_extraction(payload: ExtractionRunRequest) -> ExtractionRunResponse:
     finished_at = utcnow()
     total_seconds = time.perf_counter() - start
     warnings = _run_warnings(parser_result, chunks, validation_errors)
-    return ExtractionRunResponse(
+    res = ExtractionRunResponse(
         run_id=f"ext-{uuid.uuid4().hex[:10]}",
         input=input_info,
         parser_id=parser_id,
         parser_name=parser_name,
         parser_run_id=parser_result.run_id or None,
         parser_run_started_at=parser_run_started_at,
-        evidence_mode=payload.evidence_mode,
         extraction_tier=payload.extraction_tier,
         schema_model_name=model_name,
         schema_definition=payload.output_schema.model_dump(mode="json"),
@@ -342,14 +343,14 @@ def run_extraction(payload: ExtractionRunRequest) -> ExtractionRunResponse:
             candidates_scanned=candidates_scanned,
             chunking_strategy=chunking_strategy_used,
             chunk_tokens=sum(chunk.token_count or 0 for chunk in chunks),
-            cleaned_evidence_used=cleaned_evidence_count > 0,
-            cleaned_evidence_items=cleaned_evidence_count,
-            llm_reconstruction_used=llm_reconstruction_items > 0,
-            llm_reconstruction_items=llm_reconstruction_items,
+            retrieval_mode="in_memory",
+            dense_hits=0,
+            sparse_hits=0,
         ),
         started_at=started_at,
         finished_at=finished_at,
     )
+    return enrich_response_bboxes(res)
 
 
 async def run_extraction_db(session: AsyncSession, payload: ExtractionRunRequest) -> ExtractionRunResponse:
@@ -362,9 +363,10 @@ async def run_extraction_db(session: AsyncSession, payload: ExtractionRunRequest
 
     start = time.perf_counter()
     started_at = utcnow()
+    logger.info("extraction_lab: run_extraction_db document=%s fields=%d", payload.input_id, len(payload.output_schema.fields))
     parser_id, parser_name, parser_result, parser_run_started_at = _load_parser_result(payload)
+    logger.info("extraction_lab: parsed pages=%d parser=%s", parser_result.pages, parser_result.library)
     chunks = _build_chunks(parser_result, payload.max_pages, payload)
-    cleaned_evidence_count = sum(1 for chunk in chunks if chunk.id.startswith("chk-") or chunk.id.startswith("cev-"))
     chunking_strategy_used = chunks[0].strategy if chunks else payload.chunking_strategy
     if not chunks:
         chunks = [
@@ -382,7 +384,12 @@ async def run_extraction_db(session: AsyncSession, payload: ExtractionRunRequest
 
     case = await CaseRepository(session).create(
         title=f"Extraction Lab: {input_info.name}",
-        metadata_json={"synthetic": True, "input_id": payload.input_id, "parser_run_id": parser_result.run_id},
+        metadata_json={
+            "synthetic": True,
+            "input_id": payload.input_id,
+            "parser_run_id": parser_result.run_id,
+            "extraction_tier": payload.extraction_tier.value,
+        },
     )
     doc = await DocumentRepository(session).create(
         case_id=case.case_id,
@@ -391,16 +398,31 @@ async def run_extraction_db(session: AsyncSession, payload: ExtractionRunRequest
         size_bytes=input_info.size_bytes,
         user_metadata={"synthetic_extraction_lab": True},
     )
-    await index_chunks(
-        session,
-        case.case_id,
-        doc.document_id,
-        [_source_chunk_to_chunk(chunk) for chunk in chunks],
-        embed_local=True,
-        embed_api=payload.extraction_tier != ExtractionTier.COST_EFFECTIVE,
-        replace_existing=True,
-    )
+    cleaned = evidence_cleaner.clean_parser_result(parser_result, max_pages=max(payload.max_pages or 200, len(chunks) and max(c.page for c in chunks) or 200))
+    logger.info("extraction_lab: evidence_cleaner enabled=%s items=%d", cleaned.get('enabled'), len(cleaned.get('items', [])))
+    if cleaned.get("enabled") and cleaned.get("items"):
+        from app.services.production_pipeline import _clean_items_to_chunks
+        await index_chunks(
+            session,
+            case.case_id,
+            doc.document_id,
+            _clean_items_to_chunks(cleaned["items"]),
+            embed_openai=True,
+            embed_api=False,
+            replace_existing=True,
+        )
+    else:
+        await index_chunks(
+            session,
+            case.case_id,
+            doc.document_id,
+            [_source_chunk_to_chunk(chunk) for chunk in chunks],
+            embed_openai=True,
+            embed_api=False,
+            replace_existing=True,
+        )
 
+    logger.info("extraction_lab: chunks built=%d strategy=%s", len(chunks), chunking_strategy_used)
     search_schema = _schema_with_query(payload.output_schema, payload.natural_language_query)
     engine_result = await run_case_extraction_db(
         session,
@@ -412,6 +434,7 @@ async def run_extraction_db(session: AsyncSession, payload: ExtractionRunRequest
         ),
         agentic=payload.extraction_tier != ExtractionTier.COST_EFFECTIVE,
     )
+    logger.info("extraction_lab: extraction complete status=%s", engine_result.status)
     fields, data, candidates_scanned = await _lab_fields_from_engine(session, payload.output_schema, engine_result)
 
     model_name, dynamic_model, generated_code = _build_pydantic_model(payload.output_schema)
@@ -440,6 +463,7 @@ async def run_extraction_db(session: AsyncSession, payload: ExtractionRunRequest
     warnings = _run_warnings(parser_result, chunks, validation_errors)
     warnings.append(f"path_b_job_id:{engine_result.job_id}")
     consistency = _consistency_from_engine(engine_result)
+    retrieval_stats = _retrieval_stats_from_engine(engine_result)
     response = ExtractionRunResponse(
         run_id=engine_result.job_id,
         input=input_info,
@@ -447,7 +471,6 @@ async def run_extraction_db(session: AsyncSession, payload: ExtractionRunRequest
         parser_name=parser_name,
         parser_run_id=parser_result.run_id or None,
         parser_run_started_at=parser_run_started_at,
-        evidence_mode=payload.evidence_mode,
         extraction_tier=payload.extraction_tier,
         schema_model_name=model_name,
         schema_definition=payload.output_schema.model_dump(mode="json"),
@@ -467,8 +490,9 @@ async def run_extraction_db(session: AsyncSession, payload: ExtractionRunRequest
             candidates_scanned=candidates_scanned,
             chunking_strategy=chunking_strategy_used,
             chunk_tokens=sum(chunk.token_count or 0 for chunk in chunks),
-            cleaned_evidence_used=cleaned_evidence_count > 0,
-            cleaned_evidence_items=cleaned_evidence_count,
+            retrieval_mode=str(retrieval_stats.get("retrieval_mode") or "unknown"),
+            dense_hits=int(retrieval_stats.get("dense_hits") or 0),
+            sparse_hits=int(retrieval_stats.get("sparse_hits") or 0),
             null_fields_detected=int(consistency.get("null_fields_detected") or 0),
             null_retries=int(consistency.get("null_retries") or 0),
             recovered_nulls=int(consistency.get("recovered_nulls") or 0),
@@ -482,10 +506,25 @@ async def run_extraction_db(session: AsyncSession, payload: ExtractionRunRequest
         started_at=started_at,
         finished_at=finished_at,
     )
+    response = enrich_response_bboxes(response)
     if not response.validation_errors:
         _write_cached_result(cache_key, response)
     await _save_extraction_result_to_db(session, payload.input_id, response)
     return response
+
+
+def _has_existing_parser_result(payload: ExtractionRunRequest) -> bool:
+    input_info = resolve_input(payload.input_id)
+    if not input_info:
+        return False
+    if input_info.input_type == "text" and payload.parser_id in {"", "auto", "plain_text"}:
+        return True
+    selected_ids = AUTO_PARSER_ORDER if payload.parser_id in {"", "auto"} else [payload.parser_id]
+    for parser_id in selected_ids:
+        latest = get_latest_ok_result_for_input(payload.input_id, parser_id)
+        if latest:
+            return True
+    return False
 
 
 async def run_multi_document_extraction_db(
@@ -493,11 +532,29 @@ async def run_multi_document_extraction_db(
     payload: MultiDocumentExtractionRunRequest,
 ) -> MultiDocumentExtractionRunResponse:
     input_ids = list(dict.fromkeys(payload.input_ids))
+    logger.info("extraction_lab: multi_doc mode=%s documents=%d", payload.multi_document_mode, len(input_ids))
     if payload.multi_document_mode == MultiDocumentMode.PER_DOCUMENT:
-        results = [
-            await run_extraction_db(session, _single_payload(payload, input_id))
-            for input_id in input_ids
-        ]
+        # Enforce pre-parsed check for all documents in the batch
+        for input_id in input_ids:
+            single = _single_payload(payload, input_id)
+            if not _has_existing_parser_result(single):
+                input_info = resolve_input(input_id)
+                fname = input_info.name if input_info else input_id
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Document '{fname}' has not been parsed yet. Please run parsing first."
+                )
+
+        import asyncio
+        from app.db.engine import get_factory
+        session_creator = get_factory()
+
+        async def run_single(input_id):
+            async with session_creator() as local_session:
+                return await run_extraction_db(local_session, _single_payload(payload, input_id))
+
+        tasks = [run_single(input_id) for input_id in input_ids]
+        results = await asyncio.gather(*tasks)
         return MultiDocumentExtractionRunResponse(mode=payload.multi_document_mode, results=results)
 
     start = time.perf_counter()
@@ -529,15 +586,30 @@ async def run_multi_document_extraction_db(
         )
         prefixed = [_prefix_chunk(chunk, doc.document_id) for chunk in chunks]
         all_chunks.extend(prefixed)
-        await index_chunks(
-            session,
-            case.case_id,
-            doc.document_id,
-            [_source_chunk_to_chunk(chunk) for chunk in prefixed],
-            embed_local=True,
-            embed_api=payload.extraction_tier != ExtractionTier.COST_EFFECTIVE,
-            replace_existing=True,
-        )
+        cleaned = evidence_cleaner.clean_parser_result(_parser_result, max_pages=200)
+        if cleaned.get("enabled") and cleaned.get("items"):
+            from app.services.production_pipeline import _clean_items_to_chunks
+            await index_chunks(
+                session,
+                case.case_id,
+                doc.document_id,
+                _clean_items_to_chunks(cleaned["items"]),
+                embed_openai=True,
+                embed_api=False,
+                replace_existing=True,
+            )
+        else:
+            await index_chunks(
+                session,
+                case.case_id,
+                doc.document_id,
+                [_source_chunk_to_chunk(chunk) for chunk in prefixed],
+                embed_openai=True,
+                embed_api=False,
+                replace_existing=True,
+            )
+
+        logger.info("extraction_lab: indexed document=%s", doc.document_id)
 
     search_schema = _schema_with_query(payload.output_schema, payload.natural_language_query)
     cache_key = _deterministic_cache_key(
@@ -581,6 +653,7 @@ async def run_multi_document_extraction_db(
         data = _json_safe(data)
 
     consistency = _consistency_from_engine(engine_result)
+    retrieval_stats = _retrieval_stats_from_engine(engine_result)
     total_seconds = time.perf_counter() - start
     bundle_input = ParserInputInfo(
         id="bundle:" + ",".join(input_ids),
@@ -597,7 +670,6 @@ async def run_multi_document_extraction_db(
         parser_name="Multi-document",
         parser_run_id=None,
         parser_run_started_at=docs[0][4] if docs else None,
-        evidence_mode=payload.evidence_mode,
         extraction_tier=payload.extraction_tier,
         schema_model_name=model_name,
         schema_definition=payload.output_schema.model_dump(mode="json"),
@@ -617,8 +689,9 @@ async def run_multi_document_extraction_db(
             candidates_scanned=candidates_scanned,
             chunking_strategy=payload.chunking_strategy,
             chunk_tokens=sum(chunk.token_count or 0 for chunk in all_chunks),
-            cleaned_evidence_used=any(chunk.id.startswith("chk-") or chunk.id.startswith("cev-") for chunk in all_chunks),
-            cleaned_evidence_items=sum(1 for chunk in all_chunks if chunk.id.startswith("chk-") or chunk.id.startswith("cev-")),
+            retrieval_mode=str(retrieval_stats.get("retrieval_mode") or "unknown"),
+            dense_hits=int(retrieval_stats.get("dense_hits") or 0),
+            sparse_hits=int(retrieval_stats.get("sparse_hits") or 0),
             null_fields_detected=int(consistency.get("null_fields_detected") or 0),
             null_retries=int(consistency.get("null_retries") or 0),
             recovered_nulls=int(consistency.get("recovered_nulls") or 0),
@@ -667,7 +740,6 @@ def _deterministic_cache_key(
         "chunk_overlap": payload.chunk_overlap,
         "max_pages": payload.max_pages,
         "max_candidates_per_field": payload.max_candidates_per_field,
-        "evidence_mode": payload.evidence_mode,
         "extraction_tier": payload.extraction_tier,
     }
     encoded = json.dumps(material, sort_keys=True, default=str, ensure_ascii=False).encode("utf-8")
@@ -679,7 +751,8 @@ def _read_cached_result(cache_key: str) -> ExtractionRunResponse | None:
     if not path.exists():
         return None
     try:
-        return ExtractionRunResponse.model_validate_json(path.read_text(encoding="utf-8"))
+        res = ExtractionRunResponse.model_validate_json(path.read_text(encoding="utf-8"))
+        return enrich_response_bboxes(res)
     except Exception:
         return None
 
@@ -723,19 +796,24 @@ def _load_parser_result(payload: ExtractionRunRequest) -> tuple[str, str, Parser
     for parser_id in selected_ids:
         module = PARSERS.get(parser_id)
         if not module:
+            logger.info("extraction_lab: parser_skip parser=%s reason=%s", parser_id, "unknown parser")
             skipped.append(f"{parser_id}: unknown parser")
             continue
         if input_info.input_type not in module.SUPPORTED_INPUT_TYPES:
+            logger.info("extraction_lab: parser_skip parser=%s reason=%s", parser_id, "unsupported input type")
             skipped.append(f"{parser_id}: unsupported input type")
             continue
         latest = get_latest_ok_result_for_input(payload.input_id, parser_id)
         if latest:
             run, result = latest
+            logger.info("extraction_lab: parser_ok parser=%s pages=%d chars=%d", parser_id, result.pages, result.chars)
             return parser_id, module.DISPLAY_NAME, result, run.started_at
+        logger.info("extraction_lab: parser_skip parser=%s reason=%s", parser_id, "no latest OK parser output")
         skipped.append(f"{parser_id}: no latest OK parser output")
 
     try:
         parser_id, parser_name, parsed = _parse_with_best_parser(payload)
+        logger.info("extraction_lab: parser_ok parser=%s pages=%d chars=%d", parser_id, parsed.pages, parsed.chars)
         return parser_id, parser_name, parsed, None
     except HTTPException as exc:
         detail = "; ".join(skipped) or "No latest parser output found"
@@ -763,6 +841,7 @@ def _parse_with_best_parser(payload: ExtractionRunRequest) -> tuple[str, str, Pa
     input_path = Path(input_info.path)
     skipped: list[str] = []
     failed: list[str] = []
+    logger.info("extraction_lab: parse_with_best_parser input=%s", input_info.name)
     for parser_id in selected_ids:
         module = PARSERS[parser_id]
         if input_info.input_type not in module.SUPPORTED_INPUT_TYPES:
@@ -773,8 +852,9 @@ def _parse_with_best_parser(payload: ExtractionRunRequest) -> tuple[str, str, Pa
             continue
         try:
             result = module.parse(input_path, preview_chars=payload.preview_chars)
-        except Exception as exc:
-            failed.append(f"{parser_id}: {exc.__class__.__name__}: {exc}")
+        except Exception as e:
+            logger.warning("extraction_lab: parser_fail parser=%s: %s", parser_id, e)
+            failed.append(f"{parser_id}: {e.__class__.__name__}: {e}")
             continue
         if result.status == ParserStatus.OK and (result.raw_text or result.text_preview).strip():
             return parser_id, module.DISPLAY_NAME, result
@@ -783,6 +863,7 @@ def _parse_with_best_parser(payload: ExtractionRunRequest) -> tuple[str, str, Pa
         else:
             failed.append(f"{parser_id}: {result.error or 'empty parser result'}")
 
+    logger.error("extraction_lab: all_parsers_failed")
     detail = "; ".join(failed or skipped or ["No compatible parser could process this input"])
     raise HTTPException(status_code=422, detail=detail)
 
@@ -853,13 +934,16 @@ def _normalize_chunk_strategy(value: str | None) -> ChunkStrategy:
 
 
 def _chunk_to_source_chunk(chunk: Chunk) -> SourceChunk | None:
-    if not chunk.text or not chunk.text.strip():
+    text = chunk.text
+    if (not text or not text.strip()) and chunk.source_url:
+        text = f"Image evidence: {chunk.source_url}"
+    if not text or not text.strip():
         return None
     return SourceChunk(
         id=chunk.chunk_id,
         page=chunk.page,
         type=chunk.chunk_type,
-        text=chunk.text,
+        text=text,
         bbox=chunk.bbox,
         confidence=chunk.confidence,
         risk=chunk.risk,
@@ -938,7 +1022,7 @@ def _lab_field_to_json_schema(field: ExtractionSchemaField) -> dict[str, Any]:
     }
     payload: dict[str, Any] = {
         "type": type_map.get(field.type, "string"),
-        "description": "\n".join(part for part in [field.label, field.description] if part),
+        "description": _enhanced_field_description(field.key, field.label, field.description),
     }
     if field.children and field.type == ExtractionFieldType.LIST:
         payload["items"] = {
@@ -949,6 +1033,31 @@ def _lab_field_to_json_schema(field: ExtractionSchemaField) -> dict[str, Any]:
     elif field.children:
         payload["properties"] = {child.key: _lab_field_to_json_schema(child) for child in field.children}
     return payload
+
+
+def _enhanced_field_description(key: str, label: str | None, description: str | None) -> str:
+    base = "\n".join(part for part in [label, description] if part).strip()
+    haystack = f"{key} {label or ''} {description or ''}".lower()
+    guidance = ""
+    if any(token in haystack for token in ("documenttitle", "document title", "documentname", "document name", "report title")):
+        guidance = "Extract the report/document title from the cover or first page; do not use appendix headings such as CREDIT RATING DEFINITIONS."
+    elif any(token in haystack for token in ("reportdate", "report date", "reportingperiod", "reporting period")):
+        guidance = "Extract the report date or reporting period from the cover/header; prefer month-year or ISO date when clear."
+    elif any(token in haystack for token in ("issuer", "companyname", "company name", "ratedentity", "rated entity")):
+        guidance = "Extract the rated company/issuer/entity name; do not return the rating agency name."
+    elif "ratingdriver" in haystack or "rating driver" in haystack:
+        guidance = "Extract concise rating drivers/rationale bullets only; exclude raw tables, definitions, and unrelated narrative."
+    elif any(token in haystack for token in ("ratings", "creditratings", "credit ratings", "instrument")):
+        guidance = "Extract actual credit ratings and rated instruments/facilities only; exclude headings and unrelated ratio/risk discussion."
+    elif "summary" in haystack:
+        guidance = "Extract a short user-readable summary supported by the document; avoid raw markup and long copied sections."
+    elif any(token in haystack for token in ("image", "figure", "chart", "logo", "visual")):
+        guidance = "Extract relevant image or figure references only when the parser evidence contains image URLs; return the image URL and a short caption when possible."
+    elif "analyst" in haystack:
+        guidance = "Extract analyst/contact person names only when present; exclude cover headings and report titles."
+    elif "subsidiar" in haystack or "associate" in haystack:
+        guidance = "Extract subsidiary or associate names only; exclude financial tables and cover headings."
+    return "\n".join(part for part in [base, guidance] if part)
 
 
 async def _lab_fields_from_engine(
@@ -993,6 +1102,12 @@ def _consistency_from_engine(engine_result: ExtractionResult) -> dict[str, Any]:
     return consistency if isinstance(consistency, dict) else {}
 
 
+def _retrieval_stats_from_engine(engine_result: ExtractionResult) -> dict[str, Any]:
+    report = engine_result.validation_report if isinstance(engine_result.validation_report, dict) else {}
+    retrieval_stats = report.get("retrieval_stats")
+    return retrieval_stats if isinstance(retrieval_stats, dict) else {}
+
+
 async def _evidence_for_engine_result(
     session: AsyncSession,
     engine_result: ExtractionResult,
@@ -1014,55 +1129,22 @@ async def _evidence_for_engine_result(
             type=row.source_type,
             text_preview=preview_text(row.text or row.markdown or "", 260),
             bbox=row.bbox if isinstance(row.bbox, dict) else None,
+            source_url=_evidence_source_url(row),
         )
         for row in result.scalars().all()
     }
 
 
-def _reconstruct_relevant_evidence(
-    schema: ExtractionLabSchema,
-    chunks: list[SourceChunk],
-    max_candidates: int,
-) -> tuple[list[SourceChunk], int]:
-    api_key = _openai_api_key()
-    if not api_key:
-        raise HTTPException(
-            status_code=422,
-            detail="LLM/VLM reconstruction requires OPENAI_API_KEY. Switch evidence mode to low-latency cleaner or set the key.",
-        )
-
-    selected = _top_schema_chunks(schema, chunks, max_candidates)
-    if not selected:
-        return chunks, 0
-    repaired = _call_openai_reconstructor(api_key, schema, selected)
-    if not repaired:
-        return chunks, 0
-
-    by_id = {chunk.id: chunk for chunk in chunks}
-    changed = 0
-    for item in repaired:
-        if not isinstance(item, dict):
-            continue
-        chunk = by_id.get(str(item.get("id") or ""))
-        text = str(item.get("text") or "").strip()
-        if not chunk or not text:
-            continue
-        chunk.text = text
-        chunk.type = str(item.get("type") or chunk.type)
-        chunk.confidence = _safe_float(item.get("confidence"), chunk.confidence or 0.78)
-        warnings = list(chunk.warnings or [])
-        warnings.append(f"reconstructed_by_{OPENAI_RECONSTRUCTION_MODEL}")
-        chunk.warnings = warnings
-        if isinstance(item.get("columns"), list):
-            chunk.columns = [str(value) for value in item["columns"]]
-        if isinstance(item.get("rows"), list):
-            chunk.rows = [
-                {str(key): str(value) for key, value in row.items()}
-                for row in item["rows"]
-                if isinstance(row, dict)
-            ]
-        changed += 1
-    return chunks, changed
+def _evidence_source_url(row: EvidenceItemModel) -> str | None:
+    metadata = row.metadata_json if isinstance(row.metadata_json, dict) else {}
+    direct = metadata.get("source_url") or metadata.get("url")
+    if isinstance(direct, str) and direct:
+        return direct
+    text = str(row.markdown or row.text or "")
+    match = re.search(r"!\[[^\]]*]\(([^)]+)\)|(/api/parser-benchmarks/media/\S+)", text)
+    if not match:
+        return None
+    return (match.group(1) or match.group(2) or "").strip() or None
 
 
 def _schema_with_query(schema: ExtractionLabSchema, query: str | None) -> ExtractionLabSchema:
@@ -1077,6 +1159,178 @@ def _schema_with_query(schema: ExtractionLabSchema, query: str | None) -> Extrac
     return schema.model_copy(update={"description": clean_query, "fields": fields})
 
 
+class FitzBboxFinder:
+    def __init__(self, pdf_path: Path | None):
+        self.pdf_path = pdf_path
+        self._doc = None
+        self._available = False
+        if pdf_path and pdf_path.exists() and str(pdf_path).lower().endswith(".pdf"):
+            try:
+                import fitz
+                self._doc = fitz.open(str(pdf_path))
+                self._available = True
+            except Exception:
+                self._available = False
+
+    def close(self) -> None:
+        if self._doc:
+            try:
+                self._doc.close()
+            except Exception:
+                pass
+        self._doc = None
+
+    def find_bbox(self, page_num: int, text: str, is_full_page: bool = False) -> dict[str, float] | None:
+        if not self._available or not self._doc or not text or not str(text).strip():
+            return None
+        try:
+            if page_num < 1 or page_num > len(self._doc):
+                return None
+            page = self._doc[page_num - 1]
+            if is_full_page:
+                blocks = page.get_text("blocks", sort=False)
+                if blocks:
+                    return {
+                        "x0": round(min(b[0] for b in blocks), 2),
+                        "top": round(min(b[1] for b in blocks), 2),
+                        "x1": round(max(b[2] for b in blocks), 2),
+                        "bottom": round(max(b[3] for b in blocks), 2),
+                    }
+                return {"x0": 0.0, "top": 0.0, "x1": round(page.rect.width, 2), "bottom": round(page.rect.height, 2)}
+
+            clean = str(text).strip()
+            rects = page.search_for(clean)
+            if rects:
+                x0 = min(r.x0 for r in rects)
+                y0 = min(r.y0 for r in rects)
+                x1 = max(r.x1 for r in rects)
+                y1 = max(r.y1 for r in rects)
+                return {"x0": round(x0, 2), "top": round(y0, 2), "x1": round(x1, 2), "bottom": round(y1, 2)}
+            
+            lines = [line.strip() for line in clean.splitlines() if len(line.strip()) >= 3]
+            matched_rects = []
+            for line in lines[:10]:
+                r_list = page.search_for(line)
+                if r_list:
+                    matched_rects.extend(r_list)
+            if matched_rects:
+                x0 = min(r.x0 for r in matched_rects)
+                y0 = min(r.y0 for r in matched_rects)
+                x1 = max(r.x1 for r in matched_rects)
+                y1 = max(r.y1 for r in matched_rects)
+                return {"x0": round(x0, 2), "top": round(y0, 2), "x1": round(x1, 2), "bottom": round(y1, 2)}
+
+            words = [w for w in clean.split() if len(w) > 1]
+            if len(words) >= 3:
+                for length in (6, 5, 4, 3):
+                    if len(words) >= length:
+                        phrase = " ".join(words[:length])
+                        r_list = page.search_for(phrase)
+                        if r_list:
+                            r = r_list[0]
+                            return {"x0": round(r.x0, 2), "top": round(r.y0, 2), "x1": round(r.x1, 2), "bottom": round(r.y1, 2)}
+
+            if words:
+                longest = max(words, key=len)
+                if len(longest) >= 5:
+                    r_list = page.search_for(longest)
+                    if r_list:
+                        r = r_list[0]
+                        return {"x0": round(r.x0, 2), "top": round(r.y0, 2), "x1": round(r.x1, 2), "bottom": round(r.y1, 2)}
+
+            for x0, y0, x1, y1, btext, bno, btype in page.get_text("blocks", sort=False):
+                if words and words[0].lower() in btext.lower() and words[-1].lower() in btext.lower():
+                    return {"x0": round(x0, 2), "top": round(y0, 2), "x1": round(x1, 2), "bottom": round(y1, 2)}
+        except Exception:
+            pass
+        return None
+
+
+def enrich_response_bboxes(response: ExtractionRunResponse) -> ExtractionRunResponse:
+    if response.input.input_type != "pdf":
+        return response
+    pdf_path = Path(response.input.path) if response.input.path else None
+    if not pdf_path or not pdf_path.exists():
+        resolved = resolve_input(response.input.id)
+        if resolved and resolved.path:
+            pdf_path = Path(resolved.path)
+    if not pdf_path or not pdf_path.exists():
+        return response
+
+    finder = FitzBboxFinder(pdf_path)
+    try:
+        new_chunks = []
+        for chunk in response.chunks:
+            if not chunk.bbox or not isinstance(chunk.bbox, dict):
+                chunk_text = getattr(chunk, "text", getattr(chunk, "text_preview", ""))
+                is_page = (chunk.type == "page" or len(chunk_text) > 1500 or getattr(chunk, "strategy", "") in {"page", "document"})
+                found_bbox = finder.find_bbox(chunk.page, chunk_text, is_full_page=is_page)
+                if found_bbox:
+                    chunk = chunk.model_copy(update={"bbox": found_bbox})
+            new_chunks.append(chunk)
+
+        new_fields = []
+        for field in response.fields:
+            new_evidence = []
+            for ev in field.evidence:
+                updated_bbox = ev.bbox
+                val_str = str(field.value).strip() if field.value is not None else ""
+                if len(val_str) >= 3 and val_str.lower() not in {"true", "false", "none", "null"}:
+                    exact_bbox = finder.find_bbox(ev.page, val_str)
+                    if exact_bbox:
+                        updated_bbox = exact_bbox
+                if not updated_bbox or not isinstance(updated_bbox, dict):
+                    ev_bbox = finder.find_bbox(ev.page, ev.text_preview)
+                    if ev_bbox:
+                        updated_bbox = ev_bbox
+                    else:
+                        matching_chunk = next((c for c in new_chunks if c.id == ev.chunk_id), None)
+                        if matching_chunk and matching_chunk.bbox:
+                            updated_bbox = matching_chunk.bbox
+                if updated_bbox != ev.bbox:
+                    ev = ev.model_copy(update={"bbox": updated_bbox})
+                new_evidence.append(ev)
+            new_fields.append(field.model_copy(update={"evidence": new_evidence}))
+
+        return response.model_copy(update={"chunks": new_chunks, "fields": new_fields})
+    finally:
+        finder.close()
+
+
+def _append_missed_fields_table(report_text: str, result: ExtractionRunResponse) -> str:
+    missed = []
+    for field in result.fields:
+        is_missing = field.value in (None, "", [], {})
+        is_invalid = not field.valid
+        if is_missing or is_invalid:
+            status = "Missing" if is_missing else "Invalid"
+            reason = field.validation_message or "Value not found in document"
+            m_type = field.type.value if hasattr(field.type, "value") else str(field.type)
+            missed.append({
+                "label": field.label or field.key,
+                "key": field.key,
+                "type": m_type,
+                "required": "Yes" if getattr(field, "required", False) else "No",
+                "status": status,
+                "reason": reason
+            })
+            
+    table_lines = [report_text.rstrip(), "", "## Missed fields", ""]
+    if missed:
+        table_lines.extend([
+            "| Field | Key | Type | Required | Status | Reason / Issue |",
+            "| :--- | :--- | :--- | :--- | :--- | :--- |"
+        ])
+        for m in missed:
+            table_lines.append(
+                f"| {m['label']} | `{m['key']}` | {m['type']} | {m['required']} | {m['status']} | {m['reason']} |"
+            )
+    else:
+        table_lines.append("All fields were successfully extracted with no validation issues.")
+        
+    return "\n".join(table_lines) + "\n"
+
+
 def generate_polished_report(result: ExtractionRunResponse) -> str:
     api_key = _openai_api_key()
     if not api_key:
@@ -1084,7 +1338,8 @@ def generate_polished_report(result: ExtractionRunResponse) -> str:
             status_code=422,
             detail="OpenAI report formatting requires OPENAI_API_KEY. Raw fields and Excel output are still available.",
         )
-    return _call_openai_report(api_key, result)
+    report = _call_openai_report(api_key, result)
+    return _append_missed_fields_table(report, result)
 
 
 def _call_openai_report(api_key: str, result: ExtractionRunResponse) -> str:
@@ -1199,12 +1454,7 @@ def _call_openai_schema_generator(
             "or booleans, use type=list with no children and state the item type in description. "
             "Do not use date, currency, email, phone, table, integer, enum, anyOf, or JSON Schema-only keys."
         ),
-        "instructions": (
-            "Generate a practical extraction schema for the user request and the selected documents. "
-            "Prefer nested object/list fields for repeated sections such as analysts, directors, "
-            "shareholders, subsidiaries, financial positions, rating drivers, and stakeholders. "
-            "Return only JSON with key schema."
-        ),
+        "instructions": SCHEMA_GENERATION_SYSTEM_PROMPT,
     }
     body = json.dumps(
         {
@@ -1235,76 +1485,7 @@ def _call_openai_schema_generator(
 
     parsed = _extract_response_json(payload)
     schema_payload = parsed.get("schema") if isinstance(parsed.get("schema"), dict) else parsed
-    return _normalize_generated_schema(schema_payload, query)
-
-
-def _top_schema_chunks(schema: ExtractionLabSchema, chunks: list[SourceChunk], max_candidates: int) -> list[SourceChunk]:
-    selected: dict[str, SourceChunk] = {}
-    for field in schema.fields:
-        candidates = _candidate_chunks(field, chunks, max_candidates)
-        for candidate in candidates:
-            selected.setdefault(candidate.chunk.id, candidate.chunk)
-    if not selected:
-        for chunk in chunks[:max_candidates]:
-            selected.setdefault(chunk.id, chunk)
-    return list(selected.values())[: max(max_candidates * max(len(schema.fields), 1), max_candidates)]
-
-
-def _call_openai_reconstructor(
-    api_key: str,
-    schema: ExtractionLabSchema,
-    chunks: list[SourceChunk],
-) -> list[dict[str, Any]]:
-    evidence = [
-        {
-            "id": chunk.id,
-            "page": chunk.page,
-            "type": chunk.type,
-            "text": preview_text(chunk.text, 5000),
-            "columns": chunk.columns or [],
-            "rows": chunk.rows or [],
-        }
-        for chunk in chunks
-    ]
-    prompt = {
-        "schema": schema.model_dump(mode="json"),
-        "evidence": evidence,
-        "instructions": (
-            "Clean only the supplied evidence items for schema extraction. Preserve IDs. "
-            "Return JSON with key items, where each item has id, type, text, confidence, columns, rows. "
-            "Do not invent values not supported by evidence."
-        ),
-    }
-    body = json.dumps(
-        {
-            "model": OPENAI_RECONSTRUCTION_MODEL,
-            "input": [
-                {
-                    "role": "user",
-                    "content": [{"type": "input_text", "text": json.dumps(prompt, ensure_ascii=False)}],
-                }
-            ],
-            "text": {"format": {"type": "json_object"}},
-        }
-    ).encode("utf-8")
-    request = urllib.request.Request(
-        "https://api.openai.com/v1/responses",
-        data=body,
-        headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
-        method="POST",
-    )
-    try:
-        with urllib.request.urlopen(request, timeout=90, context=_openai_ssl_context()) as response:
-            payload = json.loads(response.read().decode("utf-8"))
-    except urllib.error.HTTPError as exc:
-        detail = exc.read().decode("utf-8", errors="replace")[:500]
-        raise HTTPException(status_code=502, detail=f"OpenAI reconstruction failed: {detail}") from exc
-    except Exception as exc:
-        raise HTTPException(status_code=502, detail=f"OpenAI reconstruction failed: {exc}") from exc
-
-    parsed = _extract_response_json(payload)
-    items = parsed.get("items") if isinstance(parsed, dict) else None
-    return items if isinstance(items, list) else []
+    return _normalize_generated_schema(schema_payload, query, evidence)
 
 
 def _call_openai_field_extractor(
@@ -1341,25 +1522,38 @@ def _call_openai_field_extractor(
         return None
 
     type_hint = field.type.value if hasattr(field.type, "value") else str(field.type)
+    field_payload = {
+        "key": field.key,
+        "label": field.label,
+        "type": type_hint,
+        "description": field.description or field.label or field.key,
+        "required": bool(field.required),
+    }
+    if field.children:
+        field_payload["children"] = [
+            {
+                "key": child.key,
+                "label": child.label,
+                "type": child.type.value if hasattr(child.type, "value") else str(child.type),
+                "description": child.description or child.label or child.key,
+                "required": bool(child.required),
+            }
+            for child in field.children
+        ]
+    instructions = SINGLE_FIELD_LLM_PROMPT
+    if field.type == ExtractionFieldType.TABLE:
+        instructions += (
+            "\nFor table fields, return a JSON array of objects representing the rows of the table "
+            "(e.g., [{\"column1\": \"value1\", \"column2\": \"value2\"}]). Do not return a single flat object."
+        )
+    elif field.children:
+        child_keys = ", ".join(child.key for child in field.children)
+        instructions += f"\nFor this list, extract objects containing the properties: {child_keys}."
+
     prompt = {
-        "field": {
-            "key": field.key,
-            "label": field.label,
-            "type": type_hint,
-            "description": field.description or field.label or field.key,
-            "required": bool(field.required),
-        },
+        "field": field_payload,
         "evidence": evidence,
-        "instructions": (
-            "Extract the value for this single field from the supplied evidence only. "
-            "Do not invent values that are not supported by the evidence; use null if absent. "
-            "For numbers/currency return a JSON number (no currency symbols or thousands separators). "
-            "For dates return ISO YYYY-MM-DD when inferable, otherwise the raw string. "
-            "For booleans return true/false. For lists return a JSON array. "
-            "Return strict JSON: {\"value\": any|null, \"confidence\": number 0..1, "
-            "\"evidence_id\": string|null, \"rationale\": string}. "
-            "Set confidence high only when the evidence clearly supports the value."
-        ),
+        "instructions": instructions,
     }
     body = json.dumps(
         {
@@ -1405,13 +1599,13 @@ def _call_openai_field_extractor(
     return value, confidence, "llm_text", evidence_id
 
 
-def _normalize_generated_schema(payload: Any, query: str) -> ExtractionLabSchema:
+def _normalize_generated_schema(payload: Any, query: str, evidence: list[dict[str, Any]] | None = None) -> ExtractionLabSchema:
     if not isinstance(payload, dict):
         payload = {}
     raw_fields = payload.get("fields")
     fields = _normalize_generated_fields(raw_fields if isinstance(raw_fields, list) else [])
     if not fields:
-        fields = _fallback_schema_from_context(query, []).fields
+        fields = _fallback_schema_from_context(query, evidence or []).fields
     name = _model_name(str(payload.get("name") or _schema_name_from_query(query) or "GeneratedExtraction"))
     description = str(payload.get("description") or query or "AI generated extraction schema").strip()
     return ExtractionLabSchema(name=name, description=description, fields=fields)
@@ -1438,7 +1632,7 @@ def _normalize_generated_fields(items: list[Any], depth: int = 0) -> list[Extrac
                 key=key,
                 label=raw_label or key,
                 type=field_type,
-                description=str(item.get("description") or raw_label or key).strip(),
+                description=_enhanced_field_description(key, raw_label, str(item.get("description") or raw_label or key).strip()),
                 required=bool(item.get("required", True)),
                 children=children,
             )
@@ -1472,7 +1666,8 @@ def _normalize_generated_type(value: Any) -> ExtractionFieldType:
 
 def _fallback_schema_from_context(query: str, evidence: list[dict[str, Any]]) -> ExtractionLabSchema:
     fields: list[ExtractionSchemaField] = []
-    lower = query.lower()
+    evidence_text = "\n".join(str(item.get("text") or "") for item in evidence)
+    lower = evidence_text.lower()
     if "rating" in lower or "driver" in lower:
         fields.append(_generated_field("ratingDrivers", "Rating Drivers", ExtractionFieldType.LIST, "Main rating drivers or rationale items."))
     if "financial" in lower or "position" in lower:
@@ -1502,13 +1697,13 @@ def _fallback_schema_from_context(query: str, evidence: list[dict[str, Any]]) ->
                 ],
             )
         )
-    if not fields:
+    if not fields and evidence:
+        fields.append(_generated_field("documentSummary", "Document Summary", ExtractionFieldType.TEXT, "Concise summary of the selected parser evidence."))
+    if not fields and not evidence:
         keywords = [token for token in re.split(r"[^A-Za-z0-9]+", query) if len(token) > 2 and token.lower() not in STOPWORDS]
         for token in keywords[:8]:
             label = re.sub(r"(?<!^)([A-Z])", r" \1", token).strip().title()
             fields.append(_generated_field(_camel_key(token), label, ExtractionFieldType.TEXT, f"{label} extracted from the selected source."))
-    if not fields and evidence:
-        fields.append(_generated_field("documentSummary", "Document Summary", ExtractionFieldType.TEXT, "Concise summary of the selected document evidence."))
     if not fields:
         fields.append(_generated_field("summary", "Summary", ExtractionFieldType.TEXT, "Requested extracted information."))
     return ExtractionLabSchema(
@@ -1590,17 +1785,7 @@ def _extract_response_text(payload: dict[str, Any]) -> str:
 
 
 def _openai_api_key() -> str:
-    direct = os.getenv("OPENAI_API_KEY", "").strip()
-    if direct:
-        return direct
-    root = Path(__file__).resolve().parents[3]
-    for env_path in [root / ".env", root / "backend" / ".env"]:
-        if not env_path.exists():
-            continue
-        for line in env_path.read_text(encoding="utf-8", errors="replace").splitlines():
-            if line.strip().startswith("OPENAI_API_KEY="):
-                return line.split("=", 1)[1].strip().strip('"').strip("'")
-    return ""
+    return runtime_env_value("OPENAI_API_KEY")
 
 
 def _openai_ssl_context() -> ssl.SSLContext:
@@ -1620,7 +1805,11 @@ def _extract_field(
     candidates = _candidate_chunks(field, chunks, max_candidates)
     selected_chunks = [candidate.chunk for candidate in candidates]
     if not selected_chunks:
-        selected_chunks = chunks[:max_candidates]
+        wants_images = _field_wants_images(field)
+        if wants_images:
+            selected_chunks = chunks[:max_candidates]
+        else:
+            selected_chunks = [c for c in chunks if c.type != "image" and "Image evidence:" not in c.text][:max_candidates]
 
     if field.type == ExtractionFieldType.OBJECT and field.children:
         raw: dict[str, Any] = {}
@@ -1639,6 +1828,11 @@ def _extract_field(
         field, selected_chunks, chunks
     )
     value = _coerce_value(raw_value, field.type)
+    if field.type == ExtractionFieldType.TABLE and isinstance(value, list) and source_chunk:
+        for row in value:
+            if isinstance(row, dict):
+                row.setdefault("_evidence_page", str(source_chunk.page))
+                row.setdefault("_evidence_chunk", source_chunk.id)
     evidence = [_evidence(source_chunk)] if source_chunk else []
     if field.required and _missing(value):
         confidence = 0.0
@@ -1659,7 +1853,7 @@ def _extract_field_value_llm_first(
 
     Returns ``(raw_value, evidence_chunk, confidence)``.
     """
-    if field.type in {ExtractionFieldType.TABLE, ExtractionFieldType.LIST}:
+    if _field_wants_images(field):
         return _extract_raw_value(field, selected_chunks, all_chunks)
 
     # 1. LLM extraction (primary path).
@@ -1688,7 +1882,10 @@ def _candidate_chunks(
     field_tokens = _field_tokens(field)
     label_norms = _field_label_norms(field)
     pattern = TYPE_PATTERNS.get(field.type)
+    wants_images = _field_wants_images(field)
     for chunk in chunks:
+        if not wants_images and (chunk.type == "image" or "Image evidence:" in chunk.text):
+            continue
         text_lower = chunk.text.lower()
         tokens = _tokens(chunk.text)
         score = 0.0
@@ -1899,7 +2096,19 @@ def _coerce_value(value: Any, field_type: ExtractionFieldType) -> Any:
             return value
         return [item.strip() for item in re.split(r"[,;\n]", str(value)) if item.strip()]
     if field_type == ExtractionFieldType.TABLE:
-        return value if isinstance(value, list) else []
+        if isinstance(value, list):
+            return value
+        if isinstance(value, dict):
+            rows = []
+            for k, v in value.items():
+                if isinstance(v, dict):
+                    row = {"item": k}
+                    row.update(v)
+                    rows.append(row)
+                else:
+                    rows.append({"item": k, "amount": v})
+            return rows
+        return []
     if field_type == ExtractionFieldType.OBJECT:
         return value if isinstance(value, dict) else {}
     return value
@@ -2215,6 +2424,17 @@ def save_schema_template(name: str, schema: ExtractionLabSchema) -> ExtractionLa
         filename=path.name,
         schema_definition=schema,
     )
+
+
+def delete_schema_template(schema_id: str) -> bool:
+    """Delete a schema JSON template file from data/extraction_schemas/."""
+    safe = re.sub(r"[^a-zA-Z0-9_-]", "_", schema_id.strip()).strip("_").lower()
+    schema_dir = Path(__file__).resolve().parents[3] / "data" / "extraction_schemas"
+    path = schema_dir / f"{safe}.json"
+    if path.exists():
+        path.unlink()
+        return True
+    return False
 
 
 def _template_label(stem: str, model_name: str) -> str:

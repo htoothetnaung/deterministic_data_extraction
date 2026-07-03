@@ -1,6 +1,7 @@
 """Evidence repository with weighted PostgreSQL FTS + pgvector search."""
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 from sqlalchemy import select, text
@@ -8,6 +9,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models import EvidenceEmbeddingModel, EvidenceItemModel
 from app.db.repositories.base import BaseRepository
+
+logger = logging.getLogger(__name__)
 
 
 HYBRID_SEARCH_SQL = text(
@@ -159,6 +162,8 @@ class EvidenceRepository(BaseRepository[EvidenceItemModel]):
         source_type = str(item.get("type") or "text_block")
         if source_type == "table":
             source_type = "table_row" if rows else "table_cell"
+        elif source_type in {"image", "figure", "chart"}:
+            source_type = "image_region"
         return await self.create(
             case_id=case_id,
             document_id=document_id,
@@ -225,7 +230,10 @@ class EvidenceRepository(BaseRepository[EvidenceItemModel]):
         source_type_filter: str | None = None,
     ) -> list[dict[str, Any]]:
         """Weighted PostgreSQL FTS + pgvector search with fallbacks."""
+        path = "unknown"
         if query_embedding is not None:
+            logger.debug("evidence_repo: hybrid_search path=weighted_fts_vector top_k=%d filter=%s", top_k, source_type_filter)
+            path = "weighted_fts_vector"
             vec_literal = str(query_embedding)
             params = {
                 "query": query,
@@ -239,6 +247,7 @@ class EvidenceRepository(BaseRepository[EvidenceItemModel]):
             }
             result = await self.session.execute(HYBRID_SEARCH_SQL, params)
         else:
+            logger.debug("evidence_repo: hybrid_search path=fts_only top_k=%d filter=%s", top_k, source_type_filter)
             params = {
                 "query": query,
                 "case_id": case_id,
@@ -249,7 +258,9 @@ class EvidenceRepository(BaseRepository[EvidenceItemModel]):
 
         rows = [dict(row) for row in result.mappings()]
         if rows:
+            logger.debug("evidence_repo: hybrid_search path=%s rows=%d", path, len(rows))
             return rows[:top_k]
+        logger.info("evidence_repo: hybrid_search path=%s empty, falling back to keyword", path)
         return await self.keyword_search(
             case_id=case_id,
             query=query,
