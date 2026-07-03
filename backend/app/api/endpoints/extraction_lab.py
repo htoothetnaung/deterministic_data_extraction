@@ -310,12 +310,46 @@ async def delete_input(input_id: str):
 
 @router.delete("/results/{run_id}", response_model=dict)
 async def delete_result(run_id: str):
-    if is_db_configured():
-        async with get_factory()() as session:
-            from sqlalchemy import delete
-            from app.db.models import ExtractionResultModel
-            stmt = delete(ExtractionResultModel).where(ExtractionResultModel.run_id == run_id)
-            res = await session.execute(stmt)
-            await session.commit()
-            return {"ok": True, "deleted_run_id": run_id}
-    return {"ok": False, "message": "Database not configured"}
+    if not is_db_configured():
+        return {"ok": False, "message": "Database not configured"}
+
+    async with get_factory()() as session:
+        from sqlalchemy import delete, select
+        from app.db.models import (
+            ExtractionResultModel,
+            ExtractionJobModel,
+            CaseModel,
+        )
+
+        deleted_result = await session.execute(
+            delete(ExtractionResultModel).where(ExtractionResultModel.run_id == run_id)
+        )
+
+        job_row = (
+            await session.execute(
+                select(ExtractionJobModel).where(ExtractionJobModel.job_id == run_id)
+            )
+        ).scalar_one_or_none()
+
+        case_to_delete = None
+        if job_row:
+            case_to_delete = job_row.case_id
+            await session.execute(
+                delete(ExtractionJobModel).where(ExtractionJobModel.job_id == run_id)
+            )
+
+        if case_to_delete:
+            remaining_jobs = (
+                await session.execute(
+                    select(ExtractionJobModel.job_id).where(
+                        ExtractionJobModel.case_id == case_to_delete
+                    )
+                )
+            ).first()
+            if not remaining_jobs:
+                await session.execute(
+                    delete(CaseModel).where(CaseModel.case_id == case_to_delete)
+                )
+
+        await session.commit()
+        return {"ok": True, "deleted_run_id": run_id}

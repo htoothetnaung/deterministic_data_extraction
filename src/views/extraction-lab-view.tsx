@@ -465,6 +465,7 @@ export function ExtractionLabView() {
         }
         return next;
       });
+      qc.invalidateQueries({ queryKey: ["extraction-lab-history"] });
       toast.success("Extraction result deleted");
     },
     onError: (error) => toast.error("Delete failed", { description: String(error) }),
@@ -663,6 +664,12 @@ export function ExtractionLabView() {
     if (!checked && selectedInputId === inputId) setSelectedInputId(next[0] ?? "");
   }
 
+  function toggleAll(checked: boolean) {
+    setSelectedInputIds(checked ? inputs.map((i) => i.id) : []);
+    if (!checked) setSelectedInputId("");
+    else if (inputs.length > 0) setSelectedInputId(inputs[0].id);
+  }
+
   function removeInput(inputId: string) {
     setSelectedInputIds((current) => {
       const next = current.filter((id) => id !== inputId);
@@ -760,6 +767,7 @@ export function ExtractionLabView() {
                 inputsLoading={inputsQ.isLoading}
                 onSelectInput={selectPrimaryInput}
                 onToggleInput={toggleInput}
+                onToggleAll={toggleAll}
                 onRemoveInput={removeInput}
                 onMultiDocumentModeChange={setMultiDocumentMode}
                 onUpload={() => fileInputRef.current?.click()}
@@ -1081,6 +1089,7 @@ function DocumentPanel({
   inputsLoading,
   onSelectInput,
   onToggleInput,
+  onToggleAll,
   onRemoveInput,
   onMultiDocumentModeChange,
   onUpload,
@@ -1096,6 +1105,7 @@ function DocumentPanel({
   inputsLoading: boolean;
   onSelectInput: (inputId: string) => void;
   onToggleInput: (inputId: string, checked: boolean) => void;
+  onToggleAll: (checked: boolean) => void;
   onRemoveInput: (inputId: string) => void;
   onMultiDocumentModeChange: (mode: MultiDocumentMode) => void;
   onUpload: () => void;
@@ -1135,7 +1145,16 @@ function DocumentPanel({
           <div className="space-y-2 rounded-lg border border-border bg-muted/10 p-3">
             <div className="flex items-center justify-between gap-2">
               <Label className="text-xs text-muted-foreground">Documents to extract</Label>
-              <Badge tone="slate">{selectedInputIds.length} selected</Badge>
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  className="text-xs text-muted-foreground underline-offset-4 hover:underline"
+                  onClick={() => onToggleAll(selectedInputIds.length !== inputs.length)}
+                >
+                  {selectedInputIds.length === inputs.length ? "Deselect all" : "Select all"}
+                </button>
+                <Badge tone="slate">{selectedInputIds.length} selected</Badge>
+              </div>
             </div>
             <div className="max-h-40 space-y-2 overflow-auto pr-1">
               {inputs.map((input) => (
@@ -4628,7 +4647,11 @@ function HistoryTab({ onLoadResult, onDeleteResult }: HistoryTabProps) {
                               </DropdownMenuItem>
                             )}
                             <DropdownMenuItem
-                              onClick={() => onDeleteResult(job.job_id)}
+                              onClick={() => {
+                                if (confirm(`Delete extraction job ${job.job_id}? This will permanently remove the job and its results.`)) {
+                                  onDeleteResult(job.job_id);
+                                }
+                              }}
                               className="cursor-pointer text-destructive focus:text-destructive gap-2 focus:bg-destructive/10"
                             >
                               <Trash2 className="size-3.5" />

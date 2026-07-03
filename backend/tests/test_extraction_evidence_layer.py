@@ -701,3 +701,161 @@ def test_production_pipeline_clean_items_to_chunks() -> None:
     assert chunks[0].chunk_type == "text"
     assert chunks[1].chunk_type == "table"
     assert chunks[1].rows is not None and len(chunks[1].rows) == 1
+
+
+def test_delete_result_endpoint_removes_job_and_result(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Verify that the delete_result endpoint removes the ExtractionJobModel (which cascades
+    to FieldResultModel, FieldCandidateModel, FieldAttemptModel) and the ExtractionResultModel,
+    and cleans up orphaned cases."""
+    from unittest.mock import AsyncMock, MagicMock
+
+    from app.api.endpoints.extraction_lab import delete_result
+
+    mock_session = AsyncMock()
+    mock_session.commit = AsyncMock()
+
+    # Simulate: result deleted, job found with case_id="case-1", no remaining jobs for case
+    mock_job = MagicMock()
+    mock_job.case_id = "case-1"
+    mock_result_job = MagicMock()
+    mock_result_job.scalar_one_or_none.return_value = mock_job
+    mock_result_remaining = MagicMock()
+    mock_result_remaining.first.return_value = None  # no remaining jobs
+
+    call_count = [0]
+
+    async def fake_execute(stmt, *args, **kwargs):
+        call_count[0] += 1
+        # Call 1: delete ExtractionResultModel
+        # Call 2: select ExtractionJobModel (find job)
+        # Call 3: delete ExtractionJobModel
+        # Call 4: select ExtractionJobModel (check remaining)
+        # Call 5: delete CaseModel
+        if call_count[0] == 1:
+            return MagicMock()  # delete result
+        elif call_count[0] == 2:
+            return mock_result_job  # select job
+        elif call_count[0] == 3:
+            return MagicMock()  # delete job
+        elif call_count[0] == 4:
+            return mock_result_remaining  # check remaining
+        elif call_count[0] == 5:
+            return MagicMock()  # delete case
+        return MagicMock()
+
+    mock_session.execute = fake_execute
+
+    class FakeSessionCtx:
+        async def __aenter__(self):
+            return mock_session
+        async def __aexit__(self, *args):
+            pass
+
+    def fake_factory():
+        return FakeSessionCtx
+
+    monkeypatch.setattr("app.api.endpoints.extraction_lab.is_db_configured", lambda: True)
+    monkeypatch.setattr("app.api.endpoints.extraction_lab.get_factory", fake_factory)
+
+    import asyncio
+    result = asyncio.run(delete_result("job-123"))
+
+    assert result == {"ok": True, "deleted_run_id": "job-123"}
+    assert call_count[0] == 5  # delete result, select job, delete job, select remaining, delete case
+
+
+def test_delete_result_no_remaining_jobs_cleans_case(monkeypatch: pytest.MonkeyPatch) -> None:
+    """When a job is deleted and no other jobs reference the same case, the case is deleted too."""
+    from unittest.mock import AsyncMock, MagicMock
+
+    from app.api.endpoints.extraction_lab import delete_result
+
+    mock_session = AsyncMock()
+    mock_session.commit = AsyncMock()
+
+    mock_job = MagicMock()
+    mock_job.case_id = "case-orphan"
+    mock_result_job = MagicMock()
+    mock_result_job.scalar_one_or_none.return_value = mock_job
+
+    # Remaining jobs check returns a row (case still has other jobs)
+    mock_result_remaining = MagicMock()
+    mock_result_remaining.first.return_value = ("other-job-id",)
+
+    call_count = [0]
+
+    async def fake_execute(stmt, *args, **kwargs):
+        call_count[0] += 1
+        if call_count[0] == 1:
+            return MagicMock()  # delete result
+        elif call_count[0] == 2:
+            return mock_result_job  # select job
+        elif call_count[0] == 3:
+            return MagicMock()  # delete job
+        elif call_count[0] == 4:
+            return mock_result_remaining  # remaining jobs exist
+        return MagicMock()
+
+    mock_session.execute = fake_execute
+
+    class FakeSessionCtx:
+        async def __aenter__(self):
+            return mock_session
+        async def __aexit__(self, *args):
+            pass
+
+    def fake_factory():
+        return FakeSessionCtx
+
+    monkeypatch.setattr("app.api.endpoints.extraction_lab.is_db_configured", lambda: True)
+    monkeypatch.setattr("app.api.endpoints.extraction_lab.get_factory", fake_factory)
+
+    import asyncio
+    result = asyncio.run(delete_result("job-orphan"))
+
+    assert result == {"ok": True, "deleted_run_id": "job-orphan"}
+    assert call_count[0] == 4  # delete result, select job, delete job, select remaining (no case delete)
+
+
+def test_delete_result_no_job_deletes_only_result(monkeypatch: pytest.MonkeyPatch) -> None:
+    """When only an ExtractionResultModel exists (no matching job), only the result is deleted."""
+    from unittest.mock import AsyncMock, MagicMock
+
+    from app.api.endpoints.extraction_lab import delete_result
+
+    mock_session = AsyncMock()
+    mock_session.commit = AsyncMock()
+
+    # Job not found
+    mock_result_job = MagicMock()
+    mock_result_job.scalar_one_or_none.return_value = None
+
+    call_count = [0]
+
+    async def fake_execute(stmt, *args, **kwargs):
+        call_count[0] += 1
+        if call_count[0] == 1:
+            return MagicMock()  # delete result
+        elif call_count[0] == 2:
+            return mock_result_job  # select job (not found)
+        return MagicMock()
+
+    mock_session.execute = fake_execute
+
+    class FakeSessionCtx:
+        async def __aenter__(self):
+            return mock_session
+        async def __aexit__(self, *args):
+            pass
+
+    def fake_factory():
+        return FakeSessionCtx
+
+    monkeypatch.setattr("app.api.endpoints.extraction_lab.is_db_configured", lambda: True)
+    monkeypatch.setattr("app.api.endpoints.extraction_lab.get_factory", fake_factory)
+
+    import asyncio
+    result = asyncio.run(delete_result("job-only-result"))
+
+    assert result == {"ok": True, "deleted_run_id": "job-only-result"}
+    assert call_count[0] == 2  # delete result, select job (not found), no further operations
