@@ -220,5 +220,6 @@ class JobHistoryItem(BaseModel):
     queue_time: str
     processing_time: str
     total_time: str
+    estimated_cost_usd: float = 0.0
     created_at: str
     result_run_id: Optional[str] = None

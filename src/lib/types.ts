@@ -514,6 +514,7 @@ export interface JobHistoryItem {
   queue_time: string;
   processing_time: string;
   total_time: string;
+  estimated_cost_usd: number;
   created_at: string;
   result_run_id?: string | null;
 }

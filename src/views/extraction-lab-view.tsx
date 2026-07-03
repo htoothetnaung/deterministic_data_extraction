@@ -4442,6 +4442,19 @@ interface HistoryTabProps {
   onDeleteResult: (runId: string) => void;
 }
 
+function formatHistoryCost(value: number | null | undefined): string {
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    return "-";
+  }
+  if (value <= 0) {
+    return "$0.0000";
+  }
+  if (value < 0.01) {
+    return `$${value.toFixed(4)}`;
+  }
+  return `$${value.toFixed(2)}`;
+}
+
 function HistoryTab({ onLoadResult, onDeleteResult }: HistoryTabProps) {
   const [searchQuery, setSearchQuery] = React.useState("");
   const [isV2, setIsV2] = React.useState(true);
@@ -4523,6 +4536,7 @@ function HistoryTab({ onLoadResult, onDeleteResult }: HistoryTabProps) {
                 <TableHead className="py-3.5 font-semibold text-foreground">Queue</TableHead>
                 <TableHead className="py-3.5 font-semibold text-foreground">Processing</TableHead>
                 <TableHead className="py-3.5 font-semibold text-foreground">Total</TableHead>
+                <TableHead className="py-3.5 font-semibold text-foreground">Cost</TableHead>
                 <TableHead className="py-3.5 font-semibold text-foreground">ID</TableHead>
                 <TableHead className="py-3.5 font-semibold text-foreground">Created</TableHead>
                 <TableHead className="py-3.5 font-semibold text-foreground text-center">Results</TableHead>
@@ -4532,7 +4546,7 @@ function HistoryTab({ onLoadResult, onDeleteResult }: HistoryTabProps) {
             <TableBody>
               {historyQ.isLoading ? (
                 <TableRow>
-                  <TableCell colSpan={10} className="h-32 text-center text-muted-foreground">
+                  <TableCell colSpan={11} className="h-32 text-center text-muted-foreground">
                     <div className="flex flex-col items-center justify-center gap-2">
                       <div className="size-5 animate-spin rounded-full border-2 border-primary border-t-transparent" />
                       <span>Loading extraction history...</span>
@@ -4541,7 +4555,7 @@ function HistoryTab({ onLoadResult, onDeleteResult }: HistoryTabProps) {
                 </TableRow>
               ) : filteredJobs.length === 0 ? (
                 <TableRow>
-                  <TableCell colSpan={10} className="h-32 text-center text-muted-foreground">
+                  <TableCell colSpan={11} className="h-32 text-center text-muted-foreground">
                     No extraction jobs found.
                   </TableCell>
                 </TableRow>
@@ -4598,6 +4612,9 @@ function HistoryTab({ onLoadResult, onDeleteResult }: HistoryTabProps) {
                       </TableCell>
                       <TableCell className="py-3.5 text-muted-foreground font-mono text-xs tabular-nums">
                         {running ? "-" : job.total_time}
+                      </TableCell>
+                      <TableCell className="py-3.5 text-muted-foreground font-mono text-xs tabular-nums">
+                        {formatHistoryCost(job.estimated_cost_usd)}
                       </TableCell>
                       <TableCell className="py-3.5 font-mono text-xs text-muted-foreground">
                         <div className="flex items-center gap-1">

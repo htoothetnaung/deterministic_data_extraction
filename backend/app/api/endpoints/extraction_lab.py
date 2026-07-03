@@ -1,8 +1,11 @@
 """API endpoints for the schema-driven Extraction Lab."""
 from __future__ import annotations
 
+from collections import defaultdict
+import json
 import uuid
 from pathlib import Path
+from typing import Any
 
 from fastapi import APIRouter, File, HTTPException, UploadFile
 
@@ -28,6 +31,62 @@ from app.services.parsers.base import input_type_for, list_parser_inputs, page_c
 from app.services.parsers.orchestrator import list_parsers
 
 router = APIRouter(prefix="/extraction-lab", tags=["extraction-lab"])
+
+OCR_COST_PER_PAGE_USD = 4.0 / 1000.0
+EMBEDDING_COST_PER_TOKEN_USD = 0.02 / 1_000_000.0
+LLM_INPUT_COST_PER_TOKEN_USD = 0.25 / 1_000_000.0
+LLM_OUTPUT_COST_PER_TOKEN_USD = 2.00 / 1_000_000.0
+
+
+def _safe_int(value: Any) -> int:
+    try:
+        if value is None:
+            return 0
+        return max(0, int(value))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _estimate_tokens_from_json(value: Any) -> int:
+    if value is None:
+        return 0
+    try:
+        text = json.dumps(value, ensure_ascii=False, default=str)
+    except TypeError:
+        text = str(value)
+    return max(0, len(text) // 4)
+
+
+def _estimate_history_job_cost_usd(job: Any, result_row: Any | None, attempts: list[Any]) -> float:
+    response_json = result_row.response_json if result_row is not None else {}
+    if not isinstance(response_json, dict):
+        response_json = {}
+    stats = response_json.get("stats")
+    if not isinstance(stats, dict):
+        stats = {}
+
+    document_pages = 0
+    if getattr(job, "case", None) is not None:
+        for document in getattr(job.case, "documents", []) or []:
+            document_pages += _safe_int(getattr(document, "page_count", 0))
+
+    pages = _safe_int(stats.get("pages")) or document_pages
+    embedding_tokens = _safe_int(stats.get("chunk_tokens"))
+    llm_input_tokens = sum(_safe_int(getattr(attempt, "input_tokens", 0)) for attempt in attempts)
+    llm_output_tokens = sum(_safe_int(getattr(attempt, "output_tokens", 0)) for attempt in attempts)
+
+    if llm_output_tokens == 0 and response_json:
+        llm_output_tokens = _estimate_tokens_from_json(
+            response_json.get("data") or response_json.get("final_json") or {}
+        )
+
+    total = (
+        pages * OCR_COST_PER_PAGE_USD
+        + embedding_tokens * EMBEDDING_COST_PER_TOKEN_USD
+        + llm_input_tokens * LLM_INPUT_COST_PER_TOKEN_USD
+        + llm_output_tokens * LLM_OUTPUT_COST_PER_TOKEN_USD
+    )
+    return round(total, 6)
 
 
 @router.get("/inputs", response_model=list[ParserInputInfo])
@@ -171,7 +230,13 @@ async def get_history():
     async with get_factory()() as session:
         from sqlalchemy import select
         from sqlalchemy.orm import selectinload
-        from app.db.models import ExtractionJobModel, CaseModel, ExtractionResultModel
+        from app.db.models import (
+            CaseModel,
+            ExtractionJobModel,
+            ExtractionResultModel,
+            FieldAttemptModel,
+            FieldResultModel,
+        )
 
         stmt = (
             select(ExtractionJobModel)
@@ -184,6 +249,15 @@ async def get_history():
         stmt_results = select(ExtractionResultModel)
         res_results = await session.execute(stmt_results)
         results_by_job_id = {row.run_id: row for row in res_results.scalars().all()}
+
+        stmt_attempts = (
+            select(FieldAttemptModel, FieldResultModel.job_id)
+            .join(FieldResultModel, FieldAttemptModel.field_result_id == FieldResultModel.field_result_id)
+        )
+        res_attempts = await session.execute(stmt_attempts)
+        attempts_by_job_id = defaultdict(list)
+        for attempt, job_id in res_attempts.all():
+            attempts_by_job_id[job_id].append(attempt)
 
         items = []
         for job in jobs:
@@ -257,6 +331,12 @@ async def get_history():
 
             processing_time = format_time(processing_sec)
             total_time = format_time(total_sec)
+            result_row = results_by_job_id.get(job.job_id)
+            estimated_cost_usd = _estimate_history_job_cost_usd(
+                job,
+                result_row,
+                attempts_by_job_id.get(job.job_id, []),
+            )
 
             dt = started or datetime.utcnow()
             day = str(dt.day)
@@ -271,6 +351,7 @@ async def get_history():
                     queue_time=queue_time,
                     processing_time=processing_time,
                     total_time=total_time,
+                    estimated_cost_usd=estimated_cost_usd,
                     created_at=created_at,
                     result_run_id=job.job_id if job.job_id in results_by_job_id else None
                 )
