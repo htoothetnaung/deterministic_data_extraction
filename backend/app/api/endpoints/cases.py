@@ -1,4 +1,8 @@
-"""Case-level document bundle APIs."""
+"""Case-level document bundle APIs.
+
+Handles creating Cases, listing recent Cases, uploading document files, querying Case progress,
+and triggering parsing indexes. Supports database mode or local memory mock fallbacks.
+"""
 from __future__ import annotations
 
 import json
@@ -26,6 +30,10 @@ router = APIRouter(prefix="/cases", tags=["cases"])
 
 @router.post("", response_model=ExtractionCase)
 async def create(payload: CaseCreate):
+    """Create a new Case to group uploaded documents.
+
+    If database is configured, delegates to `create_case_db`, else falls back to in-memory store.
+    """
     if is_db_configured():
         async with get_factory()() as session:
             return await create_case_db(session, payload)
@@ -34,6 +42,10 @@ async def create(payload: CaseCreate):
 
 @router.get("", response_model=list[ExtractionCase])
 async def list_():
+    """List all recent Cases.
+
+    If database is configured, delegates to `list_cases_db`, else falls back to in-memory store.
+    """
     if is_db_configured():
         async with get_factory()() as session:
             return await list_cases_db(session)
@@ -42,6 +54,10 @@ async def list_():
 
 @router.get("/{case_id}", response_model=ExtractionCase)
 async def get(case_id: str):
+    """Get metadata for a specific Case by its ID.
+
+    If database is configured, delegates to `get_case_db`, else falls back to in-memory store.
+    """
     if is_db_configured():
         async with get_factory()() as session:
             return await get_case_db(session, case_id)
@@ -50,6 +66,10 @@ async def get(case_id: str):
 
 @router.get("/{case_id}/progress")
 async def progress(case_id: str):
+    """Query ingestion, parsing, and indexing progress statistics for all documents in a Case.
+
+    If database is configured, delegates to `get_case_progress_db`, else falls back to in-memory store.
+    """
     if is_db_configured():
         async with get_factory()() as session:
             return await get_case_progress_db(session, case_id)
@@ -59,6 +79,10 @@ async def progress(case_id: str):
 
 @router.get("/{case_id}/documents", response_model=list[DocumentMetadata])
 async def case_documents(case_id: str):
+    """List all documents attached to a specific Case.
+
+    If database is configured, delegates to `list_case_documents_db`, else falls back to in-memory store.
+    """
     if is_db_configured():
         async with get_factory()() as session:
             return await list_case_documents_db(session, case_id)
@@ -70,6 +94,14 @@ async def case_documents(case_id: str):
 
 @router.post("/{case_id}/documents", response_model=DocumentMetadata)
 async def upload_case_document(case_id: str, file: UploadFile = File(...), metadata_json: str = Form(default="{}")):
+    """Upload a new document file and associate it with a specific Case.
+
+    If database is configured:
+    * Stores file on disk.
+    * Computes SHA256 checksum hash.
+    * Performs deduplication check.
+    * Enqueues the 'quick_parse' task.
+    """
     if is_db_configured():
         if not file.filename:
             raise HTTPException(status_code=400, detail="Missing filename")
@@ -112,6 +144,10 @@ async def upload_case_document(case_id: str, file: UploadFile = File(...), metad
 
 @router.post("/{case_id}/index")
 async def index_case(case_id: str):
+    """Trigger or query document parsing and indexing status for the whole Case.
+
+    If database is configured, returns status summary; in-memory runs synchronous parse adapter.
+    """
     if is_db_configured():
         async with get_factory()() as session:
             docs = await list_case_documents_db(session, case_id)

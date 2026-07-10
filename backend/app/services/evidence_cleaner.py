@@ -1,8 +1,8 @@
 """Low-latency parser-output cleanup for extraction evidence.
 
-This layer is intentionally deterministic for now. It normalizes parser blocks,
-markdown tables, pages, and image references into evidence records that are more
-stable than raw parser markdown but cheaper than an LLM/VLM repair pass.
+This layer normalizes parser blocks, markdown/HTML tables, and image references into clean,
+deterministic evidence records. Flags financial tables for manual review and reduces their
+confidence metrics to ensure downstream verification retry loops are triggered.
 """
 from __future__ import annotations
 
@@ -12,39 +12,29 @@ from dataclasses import dataclass
 from html.parser import HTMLParser
 from typing import Any
 import logging
-logger = logging.getLogger(__name__)
 
 from app.models.parser_benchmark import ParserRunResult, ParserStatus
 from app.services.parsers.base import preview_text
 
+logger = logging.getLogger(__name__)
+
+# List of parser libraries supported by the cleaner logic.
 SUPPORTED_CLEANUP_PARSERS = {"layout_pdfplumber", "mistral_ocr", "paddleocr_vl_vllm", "docling"}
 
+# Term list used to flag high-risk financial tables that require manual audit.
 FINANCIAL_TERMS = {
-    "asset",
-    "assets",
-    "liabilities",
-    "liability",
-    "equity",
-    "revenue",
-    "profit",
-    "loss",
-    "income",
-    "cash",
-    "deposit",
-    "borrowings",
-    "payables",
-    "receivables",
-    "amortised",
-    "fair value",
-    "financial",
-    "statement",
-    "$'000",
-    "$000",
+    "asset", "assets", "liabilities", "liability", "equity", "revenue", "profit", "loss",
+    "income", "cash", "deposit", "borrowings", "payables", "receivables", "amortised",
+    "fair value", "financial", "statement", "$'000", "$000",
 }
 
 
 @dataclass
 class CleanEvidence:
+    """Represents a normalized, cleaned layout block or table segment.
+
+    Stores normalized columns/rows dicts for tables, confidence adjustments, and warnings.
+    """
     id: str
     parser_id: str
     page: int
@@ -59,6 +49,7 @@ class CleanEvidence:
     rows: list[dict[str, str]] | None = None
 
     def to_dict(self, include_text: bool = True) -> dict[str, Any]:
+        """Serialize the cleaned evidence block to a dictionary for API delivery."""
         payload = {
             "id": self.id,
             "parser_id": self.parser_id,
@@ -82,7 +73,15 @@ class CleanEvidence:
 
 
 def clean_parser_result(result: ParserRunResult, max_pages: int | None = None) -> dict[str, Any]:
-    """Return normalized evidence for parsers currently approved for cleanup."""
+    """Inspect and clean raw parser results, returning a collection of CleanEvidence records.
+
+    Workflow:
+    1. Returns disabled state if the library is not in `SUPPORTED_CLEANUP_PARSERS`.
+    2. Iterates over parser blocks, extracting layout structures and coordinate bounds.
+    3. Runs fallback recovery logic on raw markdown text to locate tabular data or images
+       that structured metadata keys missed.
+    4. Runs deduplication and returns a sorted list of clean items.
+    """
     parser_id = result.library
     if parser_id not in SUPPORTED_CLEANUP_PARSERS or result.status != ParserStatus.OK:
         logger.info("evidence_cleaner: disabled parser=%s reason=unsupported_or_failed", parser_id)
@@ -107,9 +106,6 @@ def clean_parser_result(result: ParserRunResult, max_pages: int | None = None) -
     logger.info("evidence_cleaner: parsed_blocks blocks=%d items=%d", len(blocks) if isinstance(blocks, list) else 0, len(items))
 
     raw_text = result.raw_text or result.text_preview
-    # OCR/VLM parsers often produce one large markdown block per page. Recover
-    # tables and image references from markdown/html when structured metadata is
-    # sparse.
     tables_from_raw = _tables_from_raw_text(parser_id, raw_text)
     images_from_raw = _images_from_raw_text(parser_id, raw_text)
     logger.info("evidence_cleaner: recovered_raw tables=%d images=%d", len(tables_from_raw), len(images_from_raw))
@@ -140,6 +136,7 @@ def clean_parser_result(result: ParserRunResult, max_pages: int | None = None) -
 
 
 def cleaned_items_for_extraction(result: ParserRunResult, max_pages: int) -> list[dict[str, Any]]:
+    """Fetch cleaned evidence records as flat dictionary lists for the extraction planner."""
     payload = clean_parser_result(result, max_pages=max_pages)
     if not payload.get("enabled"):
         return []
@@ -148,6 +145,7 @@ def cleaned_items_for_extraction(result: ParserRunResult, max_pages: int) -> lis
 
 
 def _clean_block(parser_id: str, block: dict[str, Any], index: int) -> CleanEvidence | None:
+    """Normalize a single parser block (cleaning text, reconstructing tables, and flagging risks)."""
     text = str(block.get("text") or block.get("text_preview") or "").strip()
     block_type = str(block.get("type") or "text").lower()
     if not text and block_type != "image":
@@ -200,6 +198,7 @@ def _clean_block(parser_id: str, block: dict[str, Any], index: int) -> CleanEvid
 
 
 def _tables_from_raw_text(parser_id: str, text: str) -> list[CleanEvidence]:
+    """Scan raw text transcripts to extract tables that were not isolated as structured blocks."""
     if not text:
         return []
     output: list[CleanEvidence] = []
@@ -261,6 +260,7 @@ def _tables_from_raw_text(parser_id: str, text: str) -> list[CleanEvidence]:
 
 
 def _images_from_raw_text(parser_id: str, text: str) -> list[CleanEvidence]:
+    """Scan raw text transcripts to recover layout image reference links."""
     if not text:
         return []
     output: list[CleanEvidence] = []
@@ -287,6 +287,7 @@ def _images_from_raw_text(parser_id: str, text: str) -> list[CleanEvidence]:
 
 
 def _page_segments(text: str) -> list[dict[str, Any]]:
+    """Segment text by page comment markers."""
     markers = list(re.finditer(r"<!--\s*page:\s*(\d+)\s*-->", text, re.I))
     if not markers:
         return [{"page": 1, "text": text}]
@@ -299,14 +300,17 @@ def _page_segments(text: str) -> list[dict[str, Any]]:
 
 
 def _contains_markdown_table(text: str) -> bool:
+    """Return True if the text block contains a markdown pipe-table structure."""
     return any(line.strip().startswith("|") and line.strip().endswith("|") for line in text.splitlines())
 
 
 def _contains_html_table(text: str) -> bool:
+    """Return True if the text block contains HTML table tags."""
     return "<table" in text.lower() and "</table" in text.lower()
 
 
 def _best_markdown_table(text: str) -> tuple[list[str], list[dict[str, str]], str] | None:
+    """Identify the markdown table inside text that contains the most rows."""
     tables = _markdown_table_groups(text)
     parsed = [_parse_markdown_table(table) for table in tables]
     parsed = [table for table in parsed if table]
@@ -316,6 +320,7 @@ def _best_markdown_table(text: str) -> tuple[list[str], list[dict[str, str]], st
 
 
 def _best_html_table(text: str) -> tuple[list[str], list[dict[str, str]], str] | None:
+    """Identify the HTML table inside text that contains the most rows."""
     parsed = _html_tables(text)
     if not parsed:
         return None
@@ -323,6 +328,7 @@ def _best_html_table(text: str) -> tuple[list[str], list[dict[str, str]], str] |
 
 
 def _html_tables(text: str) -> list[tuple[list[str], list[dict[str, str]], str]]:
+    """Parse HTML tables within text segments into columns, rows dicts, and markdown text."""
     if not _contains_html_table(text):
         return []
     parser = _TableHTMLParser()
@@ -349,6 +355,7 @@ def _html_tables(text: str) -> list[tuple[list[str], list[dict[str, str]], str]]
 
 
 class _TableHTMLParser(HTMLParser):
+    """HTML parser parsing tables cell segments."""
     def __init__(self) -> None:
         super().__init__(convert_charrefs=True)
         self.tables: list[list[list[str]]] = []
@@ -391,6 +398,7 @@ class _TableHTMLParser(HTMLParser):
 
 
 def _markdown_table_groups(text: str) -> list[str]:
+    """Group contiguous lines starting/ending with pipes into table blocks."""
     groups: list[list[str]] = []
     current: list[str] = []
     for line in text.splitlines():
@@ -406,6 +414,7 @@ def _markdown_table_groups(text: str) -> list[str]:
 
 
 def _parse_markdown_table(text: str) -> tuple[list[str], list[dict[str, str]], str] | None:
+    """Parse a raw markdown pipe table block into columns, rows dicts, and normalized markdown text."""
     raw_rows = [
         [cell.strip() for cell in line.strip().strip("|").split("|")]
         for line in text.splitlines()
@@ -434,6 +443,7 @@ def _parse_markdown_table(text: str) -> tuple[list[str], list[dict[str, str]], s
 
 
 def _records_to_markdown(headers: list[str], records: list[dict[str, str]]) -> str:
+    """Format headers and row dictionaries to standard markdown table lines."""
     lines = [
         "| " + " | ".join(headers) + " |",
         "| " + " | ".join(["---"] * len(headers)) + " |",
@@ -444,21 +454,25 @@ def _records_to_markdown(headers: list[str], records: list[dict[str, str]]) -> s
 
 
 def _clean_header(value: str, index: int) -> str:
+    """Clean whitespace inside header strings, providing default naming if empty."""
     clean = re.sub(r"\s+", " ", value.replace("\n", " ")).strip()
     return clean or f"column_{index + 1}"
 
 
 def _clean_cell(value: str) -> str:
+    """Clean newlines and redundant spaces inside cell text."""
     return re.sub(r"\s+", " ", value.replace("\n", " ")).strip()
 
 
 def _clean_text(value: str) -> str:
+    """Format and collapse consecutive whitespaces/newlines inside block text."""
     lines = [re.sub(r"[ \t]+", " ", line).strip() for line in value.splitlines()]
     lines = [line for line in lines if line]
     return "\n".join(lines)
 
 
 def _image_text_from_markdown(value: str) -> str:
+    """Extract descriptive titles and source paths from markdown image references."""
     match = re.search(r"!\[([^\]]*)\]\(([^)]+)\)", value)
     if not match:
         return ""
@@ -467,6 +481,7 @@ def _image_text_from_markdown(value: str) -> str:
 
 
 def _risk_for_item(item_type: str, text: str) -> str:
+    """Assess if a layout table contains key financial keywords that require manual auditing."""
     normalized = text.lower()
     if item_type == "table" and any(term in normalized for term in FINANCIAL_TERMS):
         return "financial_review"
@@ -474,6 +489,7 @@ def _risk_for_item(item_type: str, text: str) -> str:
 
 
 def _base_confidence(parser_id: str, block_type: str, text: str) -> float:
+    """Assign default confidence levels to blocks depending on parser source and type."""
     if block_type == "table":
         return 0.82 if parser_id == "layout_pdfplumber" else 0.74
     if block_type in {"title", "heading"}:
@@ -484,6 +500,7 @@ def _base_confidence(parser_id: str, block_type: str, text: str) -> float:
 
 
 def _dedupe_items(items: list[CleanEvidence]) -> list[CleanEvidence]:
+    """De-duplicate evidence items based on page number, type, and content SHA1 checksum."""
     seen: set[tuple[int, str, str]] = set()
     output: list[CleanEvidence] = []
     for item in items:
@@ -496,15 +513,18 @@ def _dedupe_items(items: list[CleanEvidence]) -> list[CleanEvidence]:
 
 
 def _type_order(item_type: str) -> int:
+    """Determine sorting priority weights for layout type listings."""
     return {"title": 0, "heading": 1, "table": 2, "text": 3, "markdown": 4, "image": 5}.get(item_type, 9)
 
 
 def _evidence_id(parser_id: str, page: int, item_type: str, index: int, text: str, bbox: dict[str, Any] | None) -> str:
+    """Generate a stable cryptographic evidence ID hash from attributes and text contents."""
     digest = hashlib.sha1(f"{parser_id}|{page}|{item_type}|{index}|{text[:240]}|{bbox}".encode("utf-8")).hexdigest()[:14]
     return f"cev-{parser_id}-p{page}-{item_type}-{digest}"
 
 
 def _safe_int(value: Any, default: int) -> int:
+    """Safely coerce value to integer."""
     try:
         return int(value)
     except (TypeError, ValueError):
@@ -512,6 +532,7 @@ def _safe_int(value: Any, default: int) -> int:
 
 
 def _safe_float(value: Any, default: float) -> float:
+    """Safely coerce value to float clamped within [0, 1]."""
     try:
         parsed = float(value)
     except (TypeError, ValueError):

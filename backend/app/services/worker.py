@@ -1,4 +1,9 @@
-"""Simple Postgres-backed document job worker."""
+"""Simple Postgres-backed document job worker thread.
+
+This background service runs continuously to poll, claim, and execute document processing tasks
+(quick metadata parsing, deep OCR parsing, and dense embedding vector indexing) enqueued in
+the `document_jobs` table.
+"""
 from __future__ import annotations
 
 import asyncio
@@ -9,6 +14,19 @@ from app.services.production_pipeline import deep_parse_document, index_document
 
 
 async def poll_document_jobs(interval: float = 2.0) -> None:
+    """Continuously poll the document queue for pending ingestion tasks.
+
+    Workflow:
+    1. Claims the next pending task from the database queue in a concurrency-safe manner
+       (preventing multiple worker threads from picking up the same document).
+    2. Invokes the appropriate stage of the production pipeline based on `job.task_type`:
+       * 'quick_parse': Quick metadata extraction (file size, page counts, type detection).
+       * 'deep_parse': Heavyweight OCR and structural layout text/table parsing.
+       * 'index': OpenAI vector embedding computation and HNSW indexing.
+    3. If the stage completes successfully, marks the job status as 'completed'.
+    4. If an exception occurs, rolls back the active transaction and marks the job status
+       as 'failed', logging the raw error traceback.
+    """
     if not is_db_configured():
         create_engine()
     factory = get_factory()
@@ -40,6 +58,10 @@ async def poll_document_jobs(interval: float = 2.0) -> None:
 
 
 async def main() -> None:
+    """Start the background worker polling thread.
+
+    Initializes the database engine pool and runs the infinite polling loop.
+    """
     create_engine()
     await poll_document_jobs()
 

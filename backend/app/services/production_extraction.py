@@ -1,14 +1,14 @@
-"""DB-backed case, document, search, and extraction operations."""
+"""DB-backed case, document, search, and extraction operations.
+
+This module coordinates RAG extractions, case query searches, uploads attachment mapping,
+and schema-constrained agentic extraction executions.
+"""
 from __future__ import annotations
 
 import asyncio
 import uuid
 from pathlib import Path
-
 import logging
-
-logger = logging.getLogger(__name__)
-
 from typing import Any, BinaryIO
 
 from fastapi import HTTPException
@@ -49,8 +49,11 @@ from app.models.extraction import (
 from app.services.artifact_store import ArtifactStore
 from app.services.embedding import embed_text
 
+logger = logging.getLogger(__name__)
+
 
 async def create_case_db(session: AsyncSession, payload: CaseCreate) -> ExtractionCase:
+    """Create a new extraction case record in the database."""
     repo = CaseRepository(session)
     case = await repo.create(payload.title, payload.user_id, getattr(payload, "metadata_json", None) or {})
     await session.commit()
@@ -58,11 +61,13 @@ async def create_case_db(session: AsyncSession, payload: CaseCreate) -> Extracti
 
 
 async def list_cases_db(session: AsyncSession) -> list[ExtractionCase]:
+    """Retrieve all recent cases from the database."""
     repo = CaseRepository(session)
     return [_case_model(case) for case in await repo.list_recent()]
 
 
 async def get_case_db(session: AsyncSession, case_id: str) -> ExtractionCase:
+    """Retrieve a single case record by its unique ID."""
     case = await CaseRepository(session).get(case_id)
     if case is None:
         raise HTTPException(status_code=404, detail="Case not found")
@@ -70,6 +75,7 @@ async def get_case_db(session: AsyncSession, case_id: str) -> ExtractionCase:
 
 
 async def get_case_progress_db(session: AsyncSession, case_id: str) -> dict[str, Any]:
+    """Retrieve parsing progression statistics (total documents, pages, parsed items) for a case."""
     case = await CaseRepository(session).get(case_id)
     if case is None:
         raise HTTPException(status_code=404, detail="Case not found")
@@ -77,6 +83,7 @@ async def get_case_progress_db(session: AsyncSession, case_id: str) -> dict[str,
 
 
 async def list_case_documents_db(session: AsyncSession, case_id: str) -> list[DocumentMetadata]:
+    """Fetch metadata for all documents registered within a specific case folder."""
     docs = await DocumentRepository(session).list_by_case(case_id)
     return [_document_model(doc) for doc in docs]
 
@@ -89,6 +96,12 @@ async def attach_upload_to_case_db(
     mime_type: str,
     user_metadata: dict[str, Any] | None = None,
 ) -> DocumentMetadata:
+    """Register an uploaded document file, store it on disk, and queue it for quick parsing.
+
+    Saves the file to physical storage, calculates its SHA256 checksum, handles duplicate mapping
+    checks, inserts a Document record into the database, and pushes a 'quick_parse' job into
+    the queue table.
+    """
     case = await CaseRepository(session).get(case_id)
     if case is None:
         raise HTTPException(status_code=404, detail="Case not found")
@@ -118,6 +131,11 @@ async def attach_upload_to_case_db(
 
 
 async def search_case_db(session: AsyncSession, case_id: str, payload: SearchRequest) -> list[SearchHit]:
+    """Perform a hybrid dense/sparse RAG query search across all documents within a case.
+
+    Generates the dense query vector embedding via the embedding API, then calls `hybrid_search`
+    on the Evidence repository.
+    """
     repo = EvidenceRepository(session)
     query_embedding = await asyncio.to_thread(embed_text, payload.query)
     rows = await repo.hybrid_search(
@@ -136,6 +154,7 @@ async def search_case_db(session: AsyncSession, case_id: str, payload: SearchReq
 
 
 async def list_document_evidence_db(session: AsyncSession, document_id: str) -> list[dict[str, Any]]:
+    """Retrieve all parsed layout and text chunks (evidence items) for a single document."""
     rows = await EvidenceRepository(session).list_by_document(document_id)
     return [
         {
@@ -160,9 +179,20 @@ async def run_case_extraction_db(
     *,
     agentic: bool = False,
 ) -> ExtractionResult:
+    """Coordinate schema-based data extraction from all indexed documents in a case.
+
+    Workflow:
+    1. Creates a new ExtractionJob record.
+    2. Runs either schema-constrained agentic extraction or standard field-by-field extraction loops.
+    3. For standard extraction:
+       * Plans retrieval criteria per field.
+       * Runs progressive retrieval attempts (FTS + vector search) up to 3 times if values are missing
+         or fail schema validations.
+       * Resolves candidate values, runs regex/type validation constraints, and logs model cost audits.
+    4. Updates final job status ('needs_review' or 'completed') based on validation results and commits.
+    """
     schema = payload.output_schema if payload.output_schema else None
     if schema is None:
-        # Keep compatibility with schema_id-only requests by using an empty object schema.
         schema = {"type": "object", "properties": {}}
 
     job_repo = ExtractionJobRepository(session)
@@ -173,9 +203,6 @@ async def run_case_extraction_db(
     try:
         planner = FieldRetrievalPlanner()
         retriever = ProgressiveRetriever(EvidenceRepository(session))
-        # Extraction quality for rich/nested schemas depends on the LLM extractor.
-        # Repeatability is handled at the Extraction Lab layer by replaying the
-        # cached result for identical document/schema/settings fingerprints.
         if agentic:
             return await _run_schema_constrained_case_extraction_db(
                 session=session,
@@ -322,6 +349,12 @@ async def _run_schema_constrained_case_extraction_db(
     planner: FieldRetrievalPlanner,
     retriever: ProgressiveRetriever,
 ) -> ExtractionResult:
+    """Execute schema-constrained extraction using LLM structured generation modes.
+
+    Performs dense extraction of all fields in the schema concurrently, feeding the LLM
+    with mapped table structures and critical front-matter page evidence. Runs targeted
+    retry extraction routines for missing, low-confidence, or validation-failing outputs.
+    """
     properties = schema.get("properties", {}) if isinstance(schema.get("properties"), dict) else {}
     required = set(schema.get("required", []) if isinstance(schema.get("required"), list) else [])
     logger.info("production_extraction: schema_mode start case=%s fields=%d", case_id, len(properties))
@@ -543,6 +576,7 @@ async def _run_schema_constrained_case_extraction_db(
 
 
 async def get_job_db(session: AsyncSession, job_id: str) -> ExtractionResult:
+    """Retrieve an ExtractionJob run result logs and populated field results."""
     job = await ExtractionJobRepository(session).get(job_id)
     if job is None:
         raise HTTPException(status_code=404, detail="Extraction job not found")
@@ -578,6 +612,7 @@ async def get_job_db(session: AsyncSession, job_id: str) -> ExtractionResult:
 
 
 async def list_job_candidates_db(session: AsyncSession, job_id: str) -> list[dict[str, Any]]:
+    """Retrieve all resolved value candidates generated during extraction runs for audit comparisons."""
     stmt = (
         select(FieldCandidateModel, FieldResultModel.field_path)
         .join(FieldResultModel, FieldResultModel.field_result_id == FieldCandidateModel.field_result_id)
@@ -598,6 +633,10 @@ async def list_job_candidates_db(session: AsyncSession, job_id: str) -> list[dic
 
 
 async def retry_field_db(session: AsyncSession, job_id: str, field_path: str) -> ExtractionResult:
+    """Manually re-run the extraction loop for a single schema field.
+
+    Builds a temporary single-property schema request and runs the extraction engine.
+    """
     job = await ExtractionJobRepository(session).get(job_id)
     if job is None:
         raise HTTPException(status_code=404, detail="Extraction job not found")
@@ -606,6 +645,11 @@ async def retry_field_db(session: AsyncSession, job_id: str, field_path: str) ->
 
 
 async def _case_cover_evidence(session: AsyncSession, case_id: str) -> list[dict[str, Any]]:
+    """Fetch the front-matter introduction page chunks of a document.
+
+    Helps supply high-value metadata context (document type, company title, date of filing)
+    to schema-constrained extractors.
+    """
     rows = await EvidenceRepository(session).list_by_case(case_id)
     ranked = sorted(
         rows,
@@ -630,6 +674,7 @@ async def _case_cover_evidence(session: AsyncSession, case_id: str) -> list[dict
 
 
 def _evidence_row_from_model(row: EvidenceItemModel) -> dict[str, Any]:
+    """Map a database Evidence item into a key-value layout chunk dictionary."""
     return {
         "evidence_id": row.evidence_id,
         "document_id": row.document_id,
@@ -644,10 +689,12 @@ def _evidence_row_from_model(row: EvidenceItemModel) -> dict[str, Any]:
 
 
 def _extractor_for_mode(agentic: bool) -> AgenticFieldExtractor | FieldExtractor:
+    """Select the extraction strategy module class based on agentic requirements."""
     return AgenticFieldExtractor() if agentic else FieldExtractor()
 
 
 async def _field_candidates(session: AsyncSession, row: FieldResultModel) -> list[FieldCandidate]:
+    """Retrieve all child FieldCandidate rows for a given FieldResult, mapping them to Pydantic formats."""
     stmt = select(FieldCandidateModel).where(FieldCandidateModel.field_result_id == row.field_result_id)
     result = await session.execute(stmt)
     return [
@@ -674,6 +721,7 @@ async def _field_candidates(session: AsyncSession, row: FieldResultModel) -> lis
 
 
 def _case_model(case: Any) -> ExtractionCase:
+    """Map a DB Case model instance to the Pydantic API response model."""
     return ExtractionCase(
         case_id=case.case_id,
         user_id=case.user_id,
@@ -686,6 +734,10 @@ def _case_model(case: Any) -> ExtractionCase:
 
 
 def _document_model(doc: DocumentModel) -> DocumentMetadata:
+    """Map a DB Document model instance to the Pydantic API document metadata schema.
+
+    Translates parser queue statuses to overall processing states (e.g. uploaded -> processing -> indexed).
+    """
     status = DocumentStatus.FAILED if doc.parser_status == "failed" else DocumentStatus.OCR_DONE if doc.parser_status == "indexed" else DocumentStatus.PROCESSING if doc.parser_status in {"quick_parsed", "parsed"} else DocumentStatus.UPLOADED
     doc_type = DocumentType.OTHER
     inferred_type = (doc.inferred_metadata or {}).get("document_type")
@@ -711,6 +763,7 @@ def _document_model(doc: DocumentModel) -> DocumentMetadata:
 
 
 def _evidence_source(row: dict[str, Any]) -> EvidenceSource:
+    """Map a search hit database dictionary to a RAG query evidence source hit model."""
     return EvidenceSource(
         evidence_id=str(row.get("evidence_id")),
         document_id=str(row.get("document_id") or ""),
@@ -724,6 +777,7 @@ def _evidence_source(row: dict[str, Any]) -> EvidenceSource:
 
 
 def _count_map_headings(nodes: list[Any]) -> int:
+    """Count the total recursive headings parsed in a heading tree structure."""
     if not nodes:
         return 0
     return sum(1 + _count_map_headings(n.children) for n in nodes if hasattr(n, "children"))

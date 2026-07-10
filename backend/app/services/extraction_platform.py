@@ -62,12 +62,14 @@ REVIEW_ACTIONS: dict[str, list[ReviewAction]] = {}
 
 
 def create_case(payload: CaseCreate) -> ExtractionCase:
+    """Create a new Case record in local memory (mock database)."""
     case = ExtractionCase(case_id=_id("case"), title=payload.title, user_id=payload.user_id)
     CASES[case.case_id] = case
     return case
 
 
 def get_case(case_id: str) -> ExtractionCase:
+    """Retrieve an in-memory Case by ID, raising 404 if not found."""
     case = CASES.get(case_id)
     if not case:
         raise HTTPException(status_code=404, detail="Case not found")
@@ -75,10 +77,12 @@ def get_case(case_id: str) -> ExtractionCase:
 
 
 def list_cases() -> list[ExtractionCase]:
+    """List all in-memory Cases ordered by creation time."""
     return sorted(CASES.values(), key=lambda item: item.created_at, reverse=True)
 
 
 def attach_upload_to_case(case_id: str, file_path: Path, mime_type: str, size_bytes: int) -> DocumentMetadata:
+    """Attach an uploaded document reference to a Case in local memory (mock database)."""
     case = get_case(case_id)
     document_id = store.gen_id("doc-case")
     doc = DocumentMetadata(
@@ -221,6 +225,11 @@ def search_case(case_id: str, payload: SearchRequest) -> list[SearchHit]:
 
 
 def run_case_extraction(case_id: str, payload: ExtractionRequest) -> ExtractionResult:
+    """Run data extraction on in-memory case documents using a basic BM25 keyword/regex strategy.
+
+    Provides a fast, low-cost fallback or local test method. Uses simple string searches
+    and regex patterns to resolve fields instead of running fully-fledged RAG or LLMs.
+    """
     case = get_case(case_id)
     schema = get_schema(payload.schema_id)
     if not case.document_ids:

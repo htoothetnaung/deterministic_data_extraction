@@ -1,24 +1,11 @@
-"""Multi-granularity chunker for parser output.
+"""Multi-granularity chunker for document parser output.
 
-Converts a ParserRunResult into retrieval-ready Chunk objects at a chosen
-granularity so that downstream retrieval (BM25 + pgvector) and field-level
-extraction can work against the smallest sufficient evidence unit:
-
-  * document      -> one chunk for the whole document (coarsest)
-  * page          -> one chunk per page
-  * table_row     -> text blocks stay per-block; every table is decomposed
-                     into one self-describing chunk per row (header repeated)
-  * sliding_window-> token-aware overlapping windows over the full text
-  * block         -> one chunk per parser block (default, today's behaviour)
-
-The parser's own text/markdown/table structure is the source of truth. Chunks
-are built directly from ``ParserRunResult.raw_text``,
-``structured_preview.pages`` and ``structured_preview.blocks`` (plus markdown /
-HTML table samples recovered from raw text) without routing through
-``evidence_cleaner``.
-
-Chunks carry traceability metadata (page, bbox, table_index/row_index/header)
-so extracted values can be cited back to the exact source location.
+Decomposes a ParserRunResult into retrieval-ready Chunk objects at a chosen granularity:
+* 'document'      -> One chunk for the entire document (coarsest).
+* 'page'          -> One chunk per page.
+* 'table_row'     -> Decomposes tables into self-describing row chunks (with headers repeated).
+* 'sliding_window'-> Token-aware overlapping sliding windows.
+* 'block'         -> One chunk per parser-identified block.
 """
 from __future__ import annotations
 
@@ -40,6 +27,11 @@ _PAGE_MARKER = re.compile(r"<!--\s*page:\s*(\d+)\s*-->", re.IGNORECASE)
 
 @dataclass
 class ChunkConfig:
+    """Configuration limits and thresholds for the chunking logic.
+
+    Includes settings for maximum page processing boundaries, target sliding window sizes,
+    overlaps, and table rows.
+    """
     max_pages: int = 50
     chunk_size: int = 500
     chunk_overlap: int = 80
@@ -49,6 +41,11 @@ class ChunkConfig:
 
 @dataclass
 class Chunk:
+    """Represents a discrete text or table segment parsed from a document.
+
+    Holds granular indexing properties such as page context, bounding boxes, row/column lists,
+    estimated tiktoken tokens, and stable cryptographic IDs for RAG retrieval matching.
+    """
     chunk_id: str
     page: int
     chunk_type: str
@@ -69,13 +66,16 @@ class Chunk:
 
     @property
     def char_count(self) -> int:
+        """Return the number of characters in the chunk text."""
         return len(self.text)
 
     @property
     def text_preview(self) -> str:
+        """Return a shortened preview snippet of the chunk text."""
         return preview_text(self.text, 1600)
 
     def to_dict(self, include_text: bool = True) -> dict[str, Any]:
+        """Convert the Chunk dataclass into a serialized dictionary for storage or JSON APIs."""
         payload: dict[str, Any] = {
             "id": self.chunk_id,
             "page": self.page,
@@ -113,7 +113,11 @@ def chunk_parser_result(
     strategy: ChunkStrategy = DEFAULT_STRATEGY,
     config: Optional[ChunkConfig] = None,
 ) -> list[Chunk]:
-    """Chunk a parsed document into retrieval units at the requested granularity."""
+    """Decompose a parsed document into indexing units using the specified strategy.
+
+    Routes execution to helper strategies ('document', 'page', 'table_row', 'sliding_window', 'block')
+    and runs a final deduplication pass to prevent duplicate indexing.
+    """
     cfg = config or ChunkConfig()
     if strategy == "document":
         chunks = _chunk_document(result, cfg)
@@ -129,6 +133,7 @@ def chunk_parser_result(
 
 
 def _chunk_blocks(result: ParserRunResult, cfg: ChunkConfig) -> list[Chunk]:
+    """Index each parser-extracted block (text paragraphs, figures, tables) as its own chunk."""
     items = _parser_items(result, cfg.max_pages)
     chunks: list[Chunk] = []
     for item in items:
@@ -162,6 +167,7 @@ def _chunk_blocks(result: ParserRunResult, cfg: ChunkConfig) -> list[Chunk]:
 
 
 def _chunk_document(result: ParserRunResult, cfg: ChunkConfig) -> list[Chunk]:
+    """Join the entire document's text transcript into a single large chunk."""
     text = _full_document_text(result)
     text = text.strip()
     if len(text) < cfg.min_chunk_chars:
@@ -181,6 +187,7 @@ def _chunk_document(result: ParserRunResult, cfg: ChunkConfig) -> list[Chunk]:
 
 
 def _chunk_pages(result: ParserRunResult, cfg: ChunkConfig) -> list[Chunk]:
+    """Slice the document transcript by page boundaries, creating one chunk per page."""
     segments = _page_segments(result)
     chunks: list[Chunk] = []
     for page_number, page_text in segments:
@@ -206,6 +213,12 @@ def _chunk_pages(result: ParserRunResult, cfg: ChunkConfig) -> list[Chunk]:
 
 
 def _chunk_table_rows(result: ParserRunResult, cfg: ChunkConfig) -> list[Chunk]:
+    """Decompose parsed tables into self-describing row units, while leaving text blocks intact.
+
+    For each row in a table, repeats the columns headers inside a small markdown table chunk.
+    This guarantees that table cell values remain contextually associated with their column meanings
+    even when indexed in isolation for dense/sparse RAG.
+    """
     items = _parser_items(result, cfg.max_pages)
     chunks: list[Chunk] = []
     table_counter = 0
@@ -305,6 +318,11 @@ def _chunk_table_rows(result: ParserRunResult, cfg: ChunkConfig) -> list[Chunk]:
 
 
 def _chunk_sliding_window(result: ParserRunResult, cfg: ChunkConfig) -> list[Chunk]:
+    """Construct overlapping token windows from the document text.
+
+    Runs tiktoken tokenization over the text transcript of each page, constructing sliding
+    windows defined by `chunk_size` and `chunk_overlap`.
+    """
     segments = _page_segments(result)
     if not segments:
         text = _full_document_text(result)
@@ -352,6 +370,7 @@ def _chunk_sliding_window(result: ParserRunResult, cfg: ChunkConfig) -> list[Chu
                         "window_overlap": overlap,
                     },
                 )
+                # Note: window_index is local to the page loop but global_index is incremented globally
             )
             global_index += 1
             if start + size >= len(tokens):
@@ -360,15 +379,10 @@ def _chunk_sliding_window(result: ParserRunResult, cfg: ChunkConfig) -> list[Chu
 
 
 def _parser_items(result: ParserRunResult, max_pages: int) -> list[dict[str, Any]]:
-    """Build evidence items directly from parser output.
+    """Retrieve blocks or tables from parsed markdown/HTML formats inside ParserRunResult.
 
-    Sources, in priority order:
-      * ``structured_preview.blocks`` (text/table/image blocks with bbox/page)
-      * markdown + HTML table samples recovered from ``raw_text`` per page
-
-    Unlike ``evidence_cleaner`` this does NOT re-rank risk, lower confidence
-    on financial content, or deduplicate by content hash: the parser's own
-    text/markdown/table structure is the source of truth.
+    Collects block items from `structured_preview.blocks` and recovers additional tabular data
+    from raw text strings.
     """
     if result.status != ParserStatus.OK:
         return []
@@ -387,8 +401,7 @@ def _parser_items(result: ParserRunResult, max_pages: int) -> list[dict[str, Any
             columns = block.get("columns") if isinstance(block.get("columns"), list) else None
             rows = _coerce_rows(block.get("rows"))
 
-            # Table blocks: prefer parser-provided rows, otherwise parse the
-            # markdown/HTML table carried in the block text.
+            # Normalize table representation if rows/columns are found.
             if block_type == "table" or columns or rows:
                 if columns and rows:
                     text = _row_table_to_markdown(columns, rows) or text
@@ -424,7 +437,7 @@ def _parser_items(result: ParserRunResult, max_pages: int) -> list[dict[str, Any
 
 
 def _tables_from_raw_text(text: str) -> list[dict[str, Any]]:
-    """Recover markdown and HTML tables from page-segmented raw text."""
+    """Recover markdown and HTML tables from page-segmented raw text strings."""
     if not text:
         return []
     output: list[dict[str, Any]] = []
@@ -464,6 +477,7 @@ def _tables_from_raw_text(text: str) -> list[dict[str, Any]]:
 
 
 def _raw_page_segments(text: str) -> list[dict[str, Any]]:
+    """Split text into raw segments by page markers without stripping comments."""
     markers = list(_PAGE_MARKER.finditer(text)) if text else []
     if not markers:
         return [{"page": 1, "text": text}]
@@ -476,6 +490,7 @@ def _raw_page_segments(text: str) -> list[dict[str, Any]]:
 
 
 def _markdown_tables_in(text: str) -> list[tuple[list[str], list[dict[str, str]], str]]:
+    """Detect and parse markdown pipe-tables in text block."""
     groups: list[list[str]] = []
     current: list[str] = []
     for line in text.splitlines():
@@ -492,6 +507,7 @@ def _markdown_tables_in(text: str) -> list[tuple[list[str], list[dict[str, str]]
 
 
 def _parse_markdown_table(text: str) -> tuple[list[str], list[dict[str, str]], str] | None:
+    """Parse a single markdown pipe table block into columns, row dicts, and normalized markdown text."""
     raw_rows = [
         [cell.strip() for cell in line.strip().strip("|").split("|")]
         for line in text.splitlines()
@@ -514,6 +530,7 @@ def _parse_markdown_table(text: str) -> tuple[list[str], list[dict[str, str]], s
 
 
 def _html_tables_in(text: str) -> list[tuple[list[str], list[dict[str, str]], str]]:
+    """Parse HTML tables within text blocks using a lightweight HTMLParser helper."""
     if "<table" not in text.lower() or "</table" not in text.lower():
         return []
     parser = _TableHTMLParser()
@@ -539,6 +556,7 @@ def _html_tables_in(text: str) -> list[tuple[list[str], list[dict[str, str]], st
 
 
 def _best_table_in_text(text: str) -> tuple[list[str], list[dict[str, str]], str] | None:
+    """Find the table in text that yields the highest count of structured data rows."""
     candidates = [*_markdown_tables_in(text), *_html_tables_in(text)]
     if not candidates:
         return None
@@ -546,6 +564,7 @@ def _best_table_in_text(text: str) -> tuple[list[str], list[dict[str, str]], str
 
 
 def _row_table_to_markdown(headers: list[str], records: list[dict[str, str]]) -> str:
+    """Format a list of header strings and key-value records into a markdown pipe-table string."""
     lines = [
         "| " + " | ".join(headers) + " |",
         "| " + " | ".join(["---"] * len(headers)) + " |",
@@ -556,6 +575,7 @@ def _row_table_to_markdown(headers: list[str], records: list[dict[str, str]]) ->
 
 
 class _TableHTMLParser(__HTML_PARSER_BASE):
+    """HTML parser helper extracting tabular row contents from raw table structures."""
     def __init__(self) -> None:
         super().__init__(convert_charrefs=True)
         self.tables: list[list[list[str]]] = []
@@ -598,6 +618,7 @@ class _TableHTMLParser(__HTML_PARSER_BASE):
 
 
 def _full_document_text(result: ParserRunResult) -> str:
+    """Concatenate the entire text contents of the parser result into a single string, stripping page tags."""
     if result.raw_text:
         return _strip_page_markers(result.raw_text)
     blocks = result.structured_preview.get("blocks")
@@ -609,6 +630,7 @@ def _full_document_text(result: ParserRunResult) -> str:
 
 
 def _page_segments(result: ParserRunResult) -> list[tuple[int, str]]:
+    """Group parser text blocks or strings by page number boundaries."""
     raw = result.raw_text or ""
     markers = list(_PAGE_MARKER.finditer(raw)) if raw else []
     if markers:
@@ -652,10 +674,12 @@ def _page_segments(result: ParserRunResult) -> list[tuple[int, str]]:
 
 
 def _strip_page_markers(text: str) -> str:
+    """Remove HTML-like page marker strings from text."""
     return _PAGE_MARKER.sub("", text)
 
 
 def _row_to_self_describing_markdown(header: list[str], row: dict[str, str]) -> str:
+    """Compile headers and a single row of cells into a self-describing 3-line markdown table."""
     header_line = "| " + " | ".join(header) + " |"
     separator = "| " + " | ".join(["---"] * len(header)) + " |"
     data_line = "| " + " | ".join(str(row.get(col, "")) for col in header) + " |"
@@ -663,6 +687,7 @@ def _row_to_self_describing_markdown(header: list[str], row: dict[str, str]) -> 
 
 
 def _coerce_rows(value: Any) -> list[dict[str, str]]:
+    """Ensure rows are lists of string key-value pairs."""
     if not isinstance(value, list):
         return []
     out: list[dict[str, str]] = []
@@ -673,6 +698,7 @@ def _coerce_rows(value: Any) -> list[dict[str, str]]:
 
 
 def _source_url(item: dict[str, Any]) -> Optional[str]:
+    """Retrieve source URLs or image paths referenced within layout block text."""
     provenance = item.get("provenance") if isinstance(item.get("provenance"), dict) else {}
     direct = item.get("source_url") or item.get("url") or provenance.get("url")
     if isinstance(direct, str) and direct:
@@ -683,12 +709,14 @@ def _source_url(item: dict[str, Any]) -> Optional[str]:
 
 
 def _stable_id(strategy: str, page: int, chunk_type: str, text: str, legacy: Any = None) -> str:
+    """Generate a stable cryptographic ID hash for a chunk based on its strategy, page, type, and text content."""
     seed = f"{strategy}|{page}|{chunk_type}|{legacy or ''}|{text[:240]}"
     digest = hashlib.sha1(seed.encode("utf-8")).hexdigest()[:14]
     return f"chk-{strategy}-{page}-{chunk_type}-{digest}"
 
 
 def _dedupe_chunks(chunks: list[Chunk]) -> list[Chunk]:
+    """De-duplicate a list of Chunk objects using their stable chunk IDs."""
     seen: set[str] = set()
     out: list[Chunk] = []
     for chunk in chunks:
@@ -703,6 +731,7 @@ _TIKTOKEN_ENC = None
 
 
 def _estimate_tokens(text: str) -> int:
+    """Estimate token usage counts using tiktoken's cl100k_base encoder (OpenAI)."""
     if not text:
         return 0
     enc = _get_tiktoken()
@@ -715,6 +744,7 @@ def _estimate_tokens(text: str) -> int:
 
 
 def _tokenize(text: str) -> list[str]:
+    """Tokenize a string using the tiktoken cl100k_base encoder."""
     enc = _get_tiktoken()
     if enc is not None:
         try:
@@ -725,6 +755,7 @@ def _tokenize(text: str) -> list[str]:
 
 
 def _detokenize(tokens: list[str]) -> str:
+    """Detokenize an array of token IDs or strings back into a readable text string."""
     enc = _get_tiktoken()
     if enc is not None and tokens and isinstance(tokens[0], int):
         try:
@@ -735,6 +766,7 @@ def _detokenize(tokens: list[str]) -> str:
 
 
 def _get_tiktoken():
+    """Retrieve the global tiktoken encoder singleton wrapper."""
     global _TIKTOKEN_ENC
     if _TIKTOKEN_ENC is False:
         return None
@@ -751,6 +783,7 @@ def _get_tiktoken():
 
 
 def _safe_int(value: Any, default: int) -> int:
+    """Safely coerce any value to an integer, falling back to a default value on error."""
     try:
         return int(value)
     except (TypeError, ValueError):
@@ -758,6 +791,7 @@ def _safe_int(value: Any, default: int) -> int:
 
 
 def _safe_float(value: Any) -> Optional[float]:
+    """Safely coerce any value to a float clamped between 0.0 and 1.0, returning None on error."""
     try:
         parsed = float(value)
     except (TypeError, ValueError):
@@ -771,10 +805,7 @@ def chunk_document(
     max_pages: int = 10,
     chunk_size: int = 512,
 ) -> list[dict[str, Any]]:
-    """Backward-compatible chunker kept for any legacy callers.
-
-    Prefer chunk_parser_result() for ParserRunResult inputs.
-    """
+    """Backward-compatible legacy chunker for older callers."""
     page_by_page = strategy == "page-by-page"
     out: list[dict[str, Any]] = []
     for index, block in enumerate(blocks):

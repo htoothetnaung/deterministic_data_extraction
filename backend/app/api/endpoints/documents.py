@@ -1,4 +1,8 @@
-"""API endpoints for documents."""
+"""API endpoints for managing documents.
+
+Provides routes to upload files, retrieve file lists and details, delete documents,
+trigger simulation processing, and query layout evidence chunks.
+"""
 from __future__ import annotations
 
 from pathlib import Path
@@ -17,7 +21,7 @@ from app.models.document import (
     DocumentUploadAck,
 )
 from app.models.document import utcnow
-from app.services import document_parser
+from app.services.parsers import quick as document_parser
 from app.services.production_extraction import list_document_evidence_db
 
 router = APIRouter(prefix="/documents", tags=["documents"])
@@ -30,6 +34,7 @@ async def list_documents(
     collection: Optional[str] = Query(None),
     q: Optional[str] = Query(None, description="Search by name"),
 ):
+    """Retrieve lists of uploaded documents, supporting filtering by type, source, or name queries."""
     docs = list(store.documents.values())
     if source:
         docs = [d for d in docs if d.source == source]
@@ -47,9 +52,9 @@ async def list_documents(
 
 @router.post("/upload", response_model=DocumentUploadAck)
 async def upload_document(file: UploadFile = File(...)):
-    """Upload a document file. Stored on disk; metadata kept in-memory.
+    """Upload a new document file. Stored on disk; metadata kept in-memory.
 
-    TODO: trigger real parsing/OCR pipeline here (currently a placeholder).
+    Runs the quick parser to estimate page counts.
     """
     if not file.filename:
         raise HTTPException(status_code=400, detail="Missing filename")
@@ -93,6 +98,7 @@ async def upload_document(file: UploadFile = File(...)):
 
 @router.get("/{document_id}", response_model=DocumentMetadata)
 async def get_document(document_id: str):
+    """Retrieve details and processing state for a specific document by its ID."""
     doc = store.documents.get(document_id)
     if not doc:
         raise HTTPException(status_code=404, detail="Document not found")
@@ -101,6 +107,10 @@ async def get_document(document_id: str):
 
 @router.get("/{document_id}/evidence")
 async def document_evidence(document_id: str):
+    """Retrieve all layout and text chunks (evidence items) extracted from a document.
+
+    Only available in database-backed modes.
+    """
     if is_db_configured():
         async with get_factory()() as session:
             return await list_document_evidence_db(session, document_id)
@@ -109,6 +119,7 @@ async def document_evidence(document_id: str):
 
 @router.delete("/{document_id}")
 async def delete_document(document_id: str):
+    """Remove a document from in-memory persistence."""
     if store.documents.pop(document_id, None) is None:
         raise HTTPException(status_code=404, detail="Document not found")
     store.ocr_results.pop(document_id, None)
@@ -117,34 +128,14 @@ async def delete_document(document_id: str):
 
 @router.post("/{document_id}/process", response_model=DocumentMetadata)
 async def process_document(document_id: str):
-    """Trigger OCR/extraction processing for a document.
-
-    PLACEHOLDER: generates a mock OCR result. Replace with a real pipeline
-    composed of: document_parser -> sentence_splitter -> chunker -> embedding.
-    """
+    """Simulate parsing and OCR completion by marking document status to OCR_DONE."""
     doc = store.documents.get(document_id)
     if not doc:
         raise HTTPException(status_code=404, detail="Document not found")
 
     doc.status = DocumentStatus.PROCESSING
     # Simulate processing
-    from app.models.ocr import OcrResult, OcrBlock, BlockType
-
-    blocks = [
-        OcrBlock(id="blk-1", page=1, type=BlockType.HEADING, text=doc.name, confidence=0.94),
-        OcrBlock(id="blk-2", page=1, type=BlockType.TEXT, text="(Placeholder OCR output — implement real extraction in the parser pipeline.)", confidence=0.8),
-    ]
-    ocr = OcrResult(
-        id=store.gen_id("ocr"),
-        document_id=document_id,
-        engine="placeholder-ocr",
-        pages=max(doc.page_count, 1),
-        blocks=blocks,
-        overall_confidence=0.87,
-        processed_at=utcnow(),
-    )
-    store.ocr_results[document_id] = ocr
     doc.status = DocumentStatus.OCR_DONE
     doc.processed_at = utcnow()
-    doc.confidence = ocr.overall_confidence
+    doc.confidence = 0.87
     return doc

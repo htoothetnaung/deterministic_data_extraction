@@ -1,4 +1,8 @@
-﻿"""Async database engine, session factory, and helper utilities."""
+"""Async database engine, session factory, and helper utilities.
+
+This module initializes the SQLAlchemy async database engine (backed by asyncpg for Postgres),
+creates the session factory, handles connection pool lifecycles, and exposes session generators.
+"""
 from __future__ import annotations
 
 from typing import AsyncGenerator
@@ -11,20 +15,37 @@ from app.core.config import settings
 
 
 class Base(DeclarativeBase):
+    """SQLAlchemy Declarative Base class.
+
+    All mapped database models inherit from this base class, allowing them to share the
+    metadata registry used to issue DDl and run model mappings.
+    """
     pass
 
 
+# Global singleton references for the database connection engine and session factory.
 _engine = None
 _factory = None
 
 
 def _get_async_driver(url: str) -> str:
+    """Ensure the database URL prefix is compatible with SQLAlchemy's asyncpg driver.
+
+    If a URL starts with standard synchronous 'postgresql://', replaces it with
+    the asynchronous driver dialect 'postgresql+asyncpg://'.
+    """
     if url.startswith("postgresql://"):
         return url.replace("postgresql://", "postgresql+asyncpg://", 1)
     return url
 
 
 def create_engine() -> None:
+    """Initialize the global async engine and session factory.
+
+    Configures connection parameters:
+    * `echo`: logs raw SQL calls (active in debug/development mode).
+    * `pool_pre_ping`: runs a check query (e.g. SELECT 1) on checkouts to discard stale connections.
+    """
     global _engine, _factory
     if _engine is not None:
         return
@@ -37,14 +58,21 @@ def create_engine() -> None:
 
 
 def get_engine():
+    """Retrieve the active SQLAlchemy AsyncEngine instance. Returns None if unconfigured."""
     return _engine
 
 
 def get_factory():
+    """Retrieve the active SQLAlchemy sessionmaker factory. Returns None if unconfigured."""
     return _factory
 
 
 async def get_db() -> AsyncGenerator[AsyncSession, None]:
+    """FastAPI dependency generator yielding a database session for request lifecycles.
+
+    Initializes the engine on first checkout, opens a connection, and safely closes
+    it in a `finally` block once the API controller finishes processing.
+    """
     if _factory is None and settings.database_url:
         create_engine()
     if _factory is None:
@@ -57,6 +85,12 @@ async def get_db() -> AsyncGenerator[AsyncSession, None]:
 
 
 async def init_db() -> None:
+    """Initialize tables and custom extensions in the target database.
+
+    Runs during application startup:
+    1. Ensures pgvector's "vector" extension is loaded in Postgres.
+    2. Runs schema creation helper (`create_all`) to construct tables that do not exist yet.
+    """
     if _engine is None:
         return
     async with _engine.begin() as conn:
@@ -65,6 +99,10 @@ async def init_db() -> None:
 
 
 async def dispose_db() -> None:
+    """Gracefully close all active connections in the connection pool.
+
+    Called during application shutdown to clean up open TCP sockets.
+    """
     global _engine, _factory
     if _engine is not None:
         await _engine.dispose()
@@ -73,4 +111,5 @@ async def dispose_db() -> None:
 
 
 def is_db_configured() -> bool:
+    """Check whether a database connection string has been configured and the engine is initialized."""
     return bool(settings.database_url) and _engine is not None

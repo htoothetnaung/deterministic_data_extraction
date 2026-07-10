@@ -109,9 +109,16 @@ UPDATE_TSV_SQL = text(
 
 
 class EvidenceRepository(BaseRepository[EvidenceItemModel]):
-    """Async repository for evidence items with weighted FTS/vector search."""
+    """Async repository for managing and querying document evidence chunks.
+
+    This repository is the core data-access point for RAG (Retrieval-Augmented Generation) search.
+    It supports creating evidence items (text paragraphs, markdown tables, image coordinates)
+    from parsers/cleaners, updating PostgreSQL Full Text Search (FTS) indices, saving vector embeddings,
+    and running hybrid dense/sparse search with multiple fallbacks.
+    """
 
     def __init__(self, session: AsyncSession) -> None:
+        """Initialize the repository, binding it specifically to the EvidenceItemModel table."""
         super().__init__(session, EvidenceItemModel)
 
     async def create(
@@ -127,6 +134,12 @@ class EvidenceRepository(BaseRepository[EvidenceItemModel]):
         metadata_json: dict[str, Any] | None = None,
         page_id: str | None = None,
     ) -> EvidenceItemModel:
+        """Create a new evidence item and trigger its search vector refresh.
+
+        This represents a single parsed element (text block, table row, image element).
+        After inserting the evidence item, it executes `refresh_search_vector` to rebuild
+        the FTS tsvector column (`tsv_search`) dynamically so it is immediately searchable.
+        """
         item = EvidenceItemModel(
             case_id=case_id,
             document_id=document_id,
@@ -150,7 +163,11 @@ class EvidenceRepository(BaseRepository[EvidenceItemModel]):
         page_id: str | None,
         item: dict[str, Any],
     ) -> EvidenceItemModel:
-        """Create an evidence item from evidence_cleaner.py output."""
+        """Convert a cleaned layout chunk (from evidence_cleaner.py) into a database evidence item.
+
+        Normalizes source types (e.g. mapping parsed tables to 'table_row' or images to 'image_region')
+        and maps fields like bounding boxes and metadata into standard database formats.
+        """
         rows = item.get("rows")
         metadata = {
             "risk": item.get("risk"),
@@ -184,7 +201,11 @@ class EvidenceRepository(BaseRepository[EvidenceItemModel]):
         chunk: dict[str, Any],
         page_id: str | None = None,
     ) -> EvidenceItemModel:
-        """Create an evidence item from a chunker.Chunk.to_dict() payload."""
+        """Convert a text/table/layout chunk (from chunker.py) into a database evidence item.
+
+        Resolves structural layout types (sliding window, page tables, figures) and stores
+        indexing metadata such as token counts, strategy names, and parent chunk IDs.
+        """
         chunk_type = str(chunk.get("type") or chunk.get("chunk_type") or "text")
         source_type = _source_type_for_chunk(chunk_type, chunk.get("rows"))
         metadata = {
@@ -215,6 +236,11 @@ class EvidenceRepository(BaseRepository[EvidenceItemModel]):
         )
 
     async def refresh_search_vector(self, evidence_id: str) -> None:
+        """Trigger update of the tsvector FTS indexing column (`tsv_search`) for a specific evidence item.
+
+        Concatenates plain text and markdown contents, runs PostgreSQL stemmers on it,
+        and saves it to the index column.
+        """
         await self.session.execute(UPDATE_TSV_SQL, {"evidence_id": evidence_id})
         await self.session.flush()
 
@@ -229,7 +255,15 @@ class EvidenceRepository(BaseRepository[EvidenceItemModel]):
         vec_limit: int = 50,
         source_type_filter: str | None = None,
     ) -> list[dict[str, Any]]:
-        """Weighted PostgreSQL FTS + pgvector search with fallbacks."""
+        """Perform a hybrid search over evidence items, falling back to simpler searches if needed.
+
+        The retrieval workflow is:
+        1. If a vector embedding is provided, run a weighted hybrid search. It calculates
+           `0.4 * FTS_Score + 0.6 * Cosine_Similarity_Score` using the HNSW index on pgvector.
+        2. If no vector embedding is provided, fall back to pure database FTS using `plainto_tsquery`.
+        3. If hybrid/FTS returns empty results, run `keyword_search` (ILIKE substring query + FTS fallback)
+           to ensure no document context is missed due to tokenization or out-of-vocabulary terms.
+        """
         path = "unknown"
         if query_embedding is not None:
             logger.debug("evidence_repo: hybrid_search path=weighted_fts_vector top_k=%d filter=%s", top_k, source_type_filter)
@@ -248,6 +282,7 @@ class EvidenceRepository(BaseRepository[EvidenceItemModel]):
             result = await self.session.execute(HYBRID_SEARCH_SQL, params)
         else:
             logger.debug("evidence_repo: hybrid_search path=fts_only top_k=%d filter=%s", top_k, source_type_filter)
+            path = "fts_only"
             params = {
                 "query": query,
                 "case_id": case_id,
@@ -275,7 +310,11 @@ class EvidenceRepository(BaseRepository[EvidenceItemModel]):
         top_k: int = 10,
         source_type_filter: str | None = None,
     ) -> list[dict[str, Any]]:
-        """Simple FTS/ILIKE fallback when embeddings are unavailable."""
+        """Perform a fallback database text search.
+
+        Executes an FTS matching check and a standard SQL `ILIKE "%query%"` substring matching check.
+        Ensures robust retrieval of acronyms, exact IDs, or short text terms that vector encoders miss.
+        """
         params = {
             "case_id": case_id,
             "query": query,
@@ -287,13 +326,19 @@ class EvidenceRepository(BaseRepository[EvidenceItemModel]):
         return [dict(row) for row in result.mappings()]
 
     async def list_by_case(self, case_id: str) -> list[EvidenceItemModel]:
+        """Fetch all evidence items parsed under a specific case."""
         return await self.list(case_id=case_id)
 
     async def list_by_document(self, document_id: str) -> list[EvidenceItemModel]:
+        """Fetch all evidence items parsed from a single document."""
         return await self.list(document_id=document_id)
 
     async def set_embedding(self, evidence_id: str, embedding: list[float]) -> EvidenceEmbeddingModel:
-        """Attach or update a pgvector embedding for an evidence item."""
+        """Attach or update the primary dense retrieval embedding (e.g. OpenAI 1536-d) for an evidence item.
+
+        Inserts a row into the `evidence_embeddings` table, or updates the coordinates if a vector record
+        already exists for the item. Flushes the session.
+        """
         stmt = select(EvidenceEmbeddingModel).where(EvidenceEmbeddingModel.evidence_id == evidence_id)
         result = await self.session.execute(stmt)
         existing = result.scalar_one_or_none()
@@ -307,7 +352,10 @@ class EvidenceRepository(BaseRepository[EvidenceItemModel]):
         return emb
 
     async def set_embedding_api(self, evidence_id: str, embedding_api: list[float]) -> EvidenceEmbeddingModel:
-        """Attach or update the API-provider (Gemini, 3072-d) embedding for an evidence item."""
+        """Attach or update the secondary API provider embedding (e.g. Gemini 3072-d) for an evidence item.
+
+        Used in advanced extraction runs that request vector search against alternative models.
+        """
         stmt = select(EvidenceEmbeddingModel).where(EvidenceEmbeddingModel.evidence_id == evidence_id)
         result = await self.session.execute(stmt)
         existing = result.scalar_one_or_none()
@@ -321,7 +369,11 @@ class EvidenceRepository(BaseRepository[EvidenceItemModel]):
         return emb
 
     async def delete_by_document(self, document_id: str) -> int:
-        """Delete all evidence items for a document (cascades embeddings). Returns count."""
+        """Delete all evidence items parsed from a document (which cascades and deletes their embeddings).
+
+        Returns the count of deleted evidence items. Used when re-processing or removing a document
+        to clean up index clutter.
+        """
         from sqlalchemy import delete as sa_delete
 
         stmt = sa_delete(EvidenceItemModel).where(EvidenceItemModel.document_id == document_id)
@@ -331,7 +383,10 @@ class EvidenceRepository(BaseRepository[EvidenceItemModel]):
 
 
 def _source_type_for_chunk(chunk_type: str, rows: Any) -> str:
-    """Map a chunk type to the evidence_items.source_type vocabulary."""
+    """Map a generic parsing chunk type string to the specific database `evidence_items.source_type` vocabulary.
+
+    Categorizes chunks (e.g. text paragraphs, table cells, image elements) so search queries can filter by type.
+    """
     normalized = (chunk_type or "").lower()
     if normalized == "table_row":
         return "table_row"

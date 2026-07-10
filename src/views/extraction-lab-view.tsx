@@ -2496,29 +2496,40 @@ function groupFieldsBySection(
 
   for (const schemaField of schema.fields) {
     const children = schemaField.children ?? [];
+    const parentField = fieldByKey.get(schemaField.key);
 
     if (children.length > 0) {
-      const sectionFields: ExtractionFieldResult[] = [];
-      for (const child of children) {
-        const childField = fieldByKey.get(child.key);
-        if (childField) {
-          sectionFields.push(childField);
-          usedKeys.add(childField.key);
-        }
-      }
-      const parentField = fieldByKey.get(schemaField.key);
-      if (sectionFields.length > 0) {
-        if (parentField) usedKeys.add(parentField.key);
-        sections.push({
-          label: schemaField.label || schemaField.key,
-          fields: sectionFields,
-        });
-      } else if (parentField) {
+      if (parentField && (isTableField(parentField) || isListField(parentField) || isObjectField(parentField) || parentField.value === null)) {
         usedKeys.add(parentField.key);
+        for (const child of children) {
+          usedKeys.add(child.key);
+        }
         sections.push({
           label: schemaField.label || schemaField.key,
           fields: [parentField],
         });
+      } else {
+        const sectionFields: ExtractionFieldResult[] = [];
+        for (const child of children) {
+          const childField = fieldByKey.get(child.key);
+          if (childField) {
+            sectionFields.push(childField);
+            usedKeys.add(childField.key);
+          }
+        }
+        if (sectionFields.length > 0) {
+          if (parentField) usedKeys.add(parentField.key);
+          sections.push({
+            label: schemaField.label || schemaField.key,
+            fields: sectionFields,
+          });
+        } else if (parentField) {
+          usedKeys.add(parentField.key);
+          sections.push({
+            label: schemaField.label || schemaField.key,
+            fields: [parentField],
+          });
+        }
       }
     } else {
       const field = fieldByKey.get(schemaField.key);

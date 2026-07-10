@@ -91,11 +91,13 @@ def _estimate_history_job_cost_usd(job: Any, result_row: Any | None, attempts: l
 
 @router.get("/inputs", response_model=list[ParserInputInfo])
 async def inputs():
+    """List all document inputs uploaded to the Extraction Lab sandbox folder."""
     return list_parser_inputs()
 
 
 @router.get("/parsers", response_model=list[ParserInfo])
 async def parsers():
+    """List all OCR/parsing engines available in the platform, placing the auto-selection order first."""
     parser_by_id = {parser.id: parser for parser in list_parsers()}
     return [
         ParserInfo(
@@ -111,16 +113,19 @@ async def parsers():
 
 @router.get("/schemas", response_model=list[ExtractionLabSchemaTemplate])
 async def schemas():
+    """Retrieve all saved Extraction Lab JSON schema templates."""
     return list_schema_templates()
 
 
 @router.post("/schemas", response_model=ExtractionLabSchemaTemplate)
 async def save_schema(payload: ExtractionLabSchema):
+    """Save or update an Extraction Lab schema template on disk."""
     return save_schema_template(payload.name, payload)
 
 
 @router.delete("/schemas/{schema_id}", response_model=dict)
 async def delete_schema_template_api(schema_id: str):
+    """Delete a saved schema template file from disk."""
     from app.services.extraction_lab import delete_schema_template
     if delete_schema_template(schema_id):
         return {"ok": True, "deleted_id": schema_id}
@@ -129,11 +134,13 @@ async def delete_schema_template_api(schema_id: str):
 
 @router.post("/upload", response_model=ParserInputInfo)
 async def upload_input(file: UploadFile = File(...)):
+    """Upload a single file to the Extraction Lab sandbox folder."""
     return await _save_upload(file)
 
 
 @router.post("/upload-multiple", response_model=list[ParserInputInfo])
 async def upload_inputs(files: list[UploadFile] = File(...)):
+    """Upload a batch of files to the Extraction Lab sandbox folder concurrently."""
     if not files:
         raise HTTPException(status_code=400, detail="No files provided")
     return [await _save_upload(file) for file in files]
@@ -178,6 +185,10 @@ async def _save_upload(file: UploadFile) -> ParserInputInfo:
 
 @router.post("/run", response_model=ExtractionRunResponse)
 async def run(payload: ExtractionRunRequest):
+    """Execute a single sandboxed extraction run.
+
+    Uses production pipeline db-backed engine when configured, otherwise runs local in-memory mock.
+    """
     if is_db_configured():
         async with get_factory()() as session:
             return await run_extraction_db(session, payload)
@@ -186,6 +197,10 @@ async def run(payload: ExtractionRunRequest):
 
 @router.post("/run-multi", response_model=MultiDocumentExtractionRunResponse)
 async def run_multi(payload: MultiDocumentExtractionRunRequest):
+    """Execute batch extractions over multiple documents.
+
+    Supports concurrent single document extractions (PER_DOCUMENT) or bundle aggregations (CROSS_DOCUMENT).
+    """
     if is_db_configured():
         async with get_factory()() as session:
             return await run_multi_document_extraction_db(session, payload)
@@ -200,16 +215,19 @@ async def run_multi(payload: MultiDocumentExtractionRunRequest):
 
 @router.post("/generate-schema", response_model=SchemaGenerationResponse)
 async def generate_schema(payload: SchemaGenerationRequest):
+    """Infer and construct a JSON schema dynamically based on target document content and natural queries."""
     return generate_schema_definition(payload)
 
 
 @router.post("/report", response_model=ExtractionReportResponse)
 async def report(payload: ExtractionReportRequest):
+    """Compile a polished extraction report with markdown tables and layout details."""
     return ExtractionReportResponse(report_markdown=generate_polished_report(payload.result))
 
 
 @router.get("/results/{input_id}", response_model=list[ExtractionRunResponse])
 async def get_results(input_id: str):
+    """Fetch all saved extraction run history records for a specific document input."""
     if is_db_configured():
         async with get_factory()() as session:
             from sqlalchemy import select
@@ -224,6 +242,10 @@ async def get_results(input_id: str):
 
 @router.get("/history", response_model=list[JobHistoryItem])
 async def get_history():
+    """Retrieve extraction job run logs list for the user history dashboard.
+
+    Calculates execution duration segments, queuing overheads, and totals OCR/model costs.
+    """
     if not is_db_configured():
         return []
 
@@ -361,6 +383,7 @@ async def get_history():
 
 @router.get("/results/job/{run_id}", response_model=ExtractionRunResponse)
 async def get_result_by_job(run_id: str):
+    """Retrieve detailed values, candidates, and metadata of a completed extraction run by its Job/Run ID."""
     if not is_db_configured():
         raise HTTPException(status_code=404, detail="Database not configured")
 
@@ -378,6 +401,7 @@ async def get_result_by_job(run_id: str):
 
 @router.delete("/inputs/{input_id:path}", response_model=dict)
 async def delete_input(input_id: str):
+    """Delete an uploaded document file from physical sandbox storage."""
     from app.services.parsers.base import resolve_input
     info = resolve_input(input_id)
     if not info or not info.path:
@@ -391,6 +415,7 @@ async def delete_input(input_id: str):
 
 @router.delete("/results/{run_id}", response_model=dict)
 async def delete_result(run_id: str):
+    """Delete a completed extraction run result from the database, along with its Case/Job records."""
     if not is_db_configured():
         return {"ok": False, "message": "Database not configured"}
 

@@ -128,6 +128,11 @@ TYPE_PATTERNS: dict[ExtractionFieldType, re.Pattern[str]] = {
     
 
 def list_schema_templates() -> list[ExtractionLabSchemaTemplate]:
+    """Retrieve and list all predefined JSON schema templates stored in the data directory.
+
+    Reads property definitions, fields types, and description guides from files located
+    at `data/extraction_schemas/*.json` to populate the frontend schema drop-down.
+    """
     schema_dir = Path(__file__).resolve().parents[3] / "data" / "extraction_schemas"
     if not schema_dir.exists():
         return []
@@ -151,6 +156,12 @@ def list_schema_templates() -> list[ExtractionLabSchemaTemplate]:
 
 
 def generate_schema_definition(payload: SchemaGenerationRequest) -> SchemaGenerationResponse:
+    """Analyze a document and a natural language query to automatically build a target JSON extraction schema.
+
+    Uses an LLM (GPT) to read a representative sample of page text and layout structures from
+    the selected document, generating a structured set of fields, types, and descriptions.
+    Falls back to a deterministic regex-based context schema draft if the OpenAI API is unconfigured.
+    """
     query = (payload.natural_language_query or "").strip()
     input_ids = list(dict.fromkeys(payload.input_ids))[:1]
     if not input_ids:
@@ -353,11 +364,43 @@ def run_extraction(payload: ExtractionRunRequest) -> ExtractionRunResponse:
     return enrich_response_bboxes(res)
 
 
+def _replace_filename_in_description(description: Optional[str], target_filename: str) -> Optional[str]:
+    if not description:
+        return description
+    pattern = r'[^\"\'\n;,\.\:]+\.pdf'
+    return re.sub(pattern, target_filename, description, flags=re.IGNORECASE)
+
+
+def _replace_filename_in_field(field: ExtractionSchemaField, target_filename: str) -> None:
+    if field.description:
+        field.description = _replace_filename_in_description(field.description, target_filename)
+    for child in field.children:
+        _replace_filename_in_field(child, target_filename)
+
+
+def _replace_filename_in_schema(schema: ExtractionLabSchema, target_filename: str) -> ExtractionLabSchema:
+    for field in schema.fields:
+        _replace_filename_in_field(field, target_filename)
+    return schema
+
+
 async def run_extraction_db(session: AsyncSession, payload: ExtractionRunRequest) -> ExtractionRunResponse:
-    """Run Extraction Lab through the case extraction engine using a synthetic case."""
+    """Run sandboxed extraction by mapping requests into the database-backed case engine.
+
+    To guarantee exact parity between production runs and sandbox benches, this method:
+    1. Creates a temporary synthetic case and document.
+    2. Runs evidence cleaning and indexes layout chunks into pgvector and FTS.
+    3. Invokes `run_case_extraction_db` to run the production RAG/LLM pipelines.
+    4. Caches successful runs (free of validation errors) using a SHA256 payload hash
+       to accelerate future runs.
+    """
     input_info = resolve_input(payload.input_id)
     if not input_info:
         raise HTTPException(status_code=404, detail="Extraction input not found")
+    
+    # Update the schema descriptions dynamically with the actual current input document name!
+    payload.output_schema = _replace_filename_in_schema(payload.output_schema.model_copy(deep=True), input_info.name)
+
     if not payload.output_schema.fields:
         raise HTTPException(status_code=400, detail="Schema must include at least one field")
 
@@ -531,6 +574,14 @@ async def run_multi_document_extraction_db(
     session: AsyncSession,
     payload: MultiDocumentExtractionRunRequest,
 ) -> MultiDocumentExtractionRunResponse:
+    """Run batch extraction over multiple documents.
+
+    Supports two modes:
+    * `PER_DOCUMENT`: Runs separate standalone extractions for each document concurrently.
+    * `CROSS_DOCUMENT` (Bundle): Combines chunks from all documents into a single case,
+       allowing the schema-constrained LLM to query and aggregate metrics across multiple files
+       simultaneously (e.g. comparing annual reports from consecutive years).
+    """
     input_ids = list(dict.fromkeys(payload.input_ids))
     logger.info("extraction_lab: multi_doc mode=%s documents=%d", payload.multi_document_mode, len(input_ids))
     if payload.multi_document_mode == MultiDocumentMode.PER_DOCUMENT:

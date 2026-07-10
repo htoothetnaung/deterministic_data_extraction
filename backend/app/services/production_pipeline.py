@@ -1,4 +1,10 @@
-"""DB-backed document processing stages for production cases."""
+"""DB-backed document processing stages for production cases.
+
+This module implements the document ingestion pipeline. It coordinates:
+1. `quick_parse`: Cheap metadata extraction (file size, page counts, type detection) to immediately populate the UI.
+2. `deep_parse`: Running heavyweight OCR/parsing engines (Docling, PaddleOCR, Mistral OCR), cleaning layouts, and storing raw page contents.
+3. `index`: Computing OpenAI embeddings for text blocks and tables in batch and saving them to the pgvector retrieval index.
+"""
 from __future__ import annotations
 
 import logging
@@ -12,7 +18,7 @@ from app.db.models import DocumentModel, PageModel
 from app.db.repositories.document_repo import DocumentRepository
 from app.db.repositories.evidence_repo import EvidenceRepository
 from app.models.parser_benchmark import ParserRunResult, ParserStatus
-from app.services import document_parser
+from app.services.parsers import quick as document_parser
 from app.services import evidence_cleaner
 from app.services.chunk_indexer import index_chunks
 from app.services.chunker import ChunkConfig, ChunkStrategy, chunk_parser_result
@@ -21,13 +27,24 @@ from app.services.parsers.orchestrator import PARSERS
 
 logger = logging.getLogger(__name__)
 
+# Default strategy to chunk documents if the layout evidence cleaner is disabled.
 DEFAULT_PRODUCTION_STRATEGY: ChunkStrategy = "page"
 
-
+# Order of candidate parsers to attempt for deep parsing.
 DEEP_PARSE_ORDER = ["mistral_ocr", "paddleocr_vl_vllm", "layout_pdfplumber", "docling", "pdfplumber", "pymupdf", "pypdf"]
 
 
 async def quick_parse_document(session: AsyncSession, document_id: str) -> DocumentModel:
+    """Perform cheap structural parsing on a newly uploaded document.
+
+    Runs quickly using local libraries (e.g. fitz/zipfile) to extract basic info:
+    * Page count.
+    * Initial preview text.
+    * Inferred document type (invoice, contract, annual report) based on keywords.
+    * Queue priority based on type.
+
+    Once finished, it enqueues a 'deep_parse' task in the database queue for the worker.
+    """
     repo = DocumentRepository(session)
     doc = await repo.get(document_id)
     if doc is None:
@@ -55,6 +72,16 @@ async def quick_parse_document(session: AsyncSession, document_id: str) -> Docum
 
 
 async def deep_parse_document(session: AsyncSession, document_id: str, parser_id: str | None = None) -> DocumentModel:
+    """Execute the main OCR and parsing pipeline on the document.
+
+    Steps:
+    1. Runs the deep parser cascade (Mistral, Docling, PaddleOCR) until one succeeds.
+    2. Inserts page text transcripts into the database (`PageModel`).
+    3. Feeds raw text/layouts to `evidence_cleaner` to filter headers, reconstruct tables, and extract images.
+    4. If the cleaner is supported for the parser result, maps output to `evidence_items` and flushes.
+    5. If unsupported, falls back to the standard page-by-page `chunker.py` to index the raw text.
+    6. Updates document status to 'parsed' and enqueues an 'index' (embedding) job.
+    """
     repo = DocumentRepository(session)
     doc = await repo.get(document_id)
     if doc is None:
@@ -69,12 +96,10 @@ async def deep_parse_document(session: AsyncSession, document_id: str, parser_id
         result.tables or 0, result.images or 0,
     )
 
-    # Store raw parser output for audit (no cleaner pass — chunks go direct).
+    # Store raw page transcripts for audit/reference in PageModel.
     page_map = await _insert_pages(session, doc, result)
 
-    # Evidence cleaner: normalize parser output (tables, images, text) into
-    # structured evidence items before indexing. Falls back to raw chunker
-    # output when the parser is not supported by the cleaner.
+    # Normalize layouts and clean duplicate content.
     cleaned = evidence_cleaner.clean_parser_result(result, max_pages=result.pages or 200)
     if cleaned.get("enabled") and cleaned.get("items"):
         logger.info(
@@ -147,6 +172,12 @@ async def deep_parse_document(session: AsyncSession, document_id: str, parser_id
 
 
 async def index_document_evidence(session: AsyncSession, document_id: str) -> DocumentModel:
+    """Compute dense vector embeddings in batch for all text evidence items.
+
+    Retrieves all evidence items parsed from the document, batches their text through the
+    OpenAI embedding API, saves the vector coordinates in `evidence_embeddings`, and marks
+    the document as 'indexed' (fully ready for RAG query searches).
+    """
     repo = DocumentRepository(session)
     doc = await repo.get(document_id)
     if doc is None:
@@ -166,6 +197,11 @@ async def index_document_evidence(session: AsyncSession, document_id: str) -> Do
 
 
 def _run_parser(path: Path, parser_id: str | None = None) -> tuple[str, ParserRunResult]:
+    """Execute candidate parsers sequentially until one completes successfully.
+
+    If a specific `parser_id` is supplied, only that parser is run.
+    Otherwise, loops through `DEEP_PARSE_ORDER` as a fallback chain.
+    """
     selected = [parser_id] if parser_id else DEEP_PARSE_ORDER
     skipped: list[str] = []
     for candidate in selected:
@@ -188,6 +224,10 @@ def _run_parser(path: Path, parser_id: str | None = None) -> tuple[str, ParserRu
 
 
 async def _insert_pages(session: AsyncSession, doc: DocumentModel, result: ParserRunResult) -> dict[int, str]:
+    """Insert or update raw page transcripts into the PageModel database table.
+
+    Splits the parsed text into page buckets and populates page quality metrics.
+    """
     existing = await session.execute(select(PageModel).where(PageModel.document_id == doc.document_id))
     existing_pages = {page.page_number: page for page in existing.scalars().all()}
     page_texts = _split_pages(result.raw_text or result.text_preview or "", result.pages or doc.page_count or 1)
@@ -213,6 +253,11 @@ async def _insert_pages(session: AsyncSession, doc: DocumentModel, result: Parse
 
 
 def _split_pages(text: str, page_count: int) -> dict[int, str]:
+    """Parse text structure to group segments into page numbers.
+
+    Looks for standard page break markdown comments (`<!-- page: N -->`) inserted by parsers
+    like Docling or Mistral OCR. Falls back to a single page if no markers are found.
+    """
     import re
 
     markers = list(re.finditer(r"<!--\s*page:\s*(\d+)\s*-->", text, re.I))
@@ -230,6 +275,7 @@ def _split_pages(text: str, page_count: int) -> dict[int, str]:
 
 
 def _quality_from_result(result: ParserRunResult) -> str:
+    """Assess parse text density quality based on average characters per page."""
     avg = (result.chars or len(result.raw_text or result.text_preview or "")) / max(result.pages or 1, 1)
     if avg < 80:
         return "poor"
@@ -239,6 +285,7 @@ def _quality_from_result(result: ParserRunResult) -> str:
 
 
 def _quality_from_text(text: str) -> str:
+    """Assess page text density quality based on length."""
     if len(text.strip()) < 80:
         return "poor"
     if len(text.strip()) < 300:
@@ -247,10 +294,15 @@ def _quality_from_text(text: str) -> str:
 
 
 def _confidence_for_quality(quality: str) -> float:
+    """Assign a confidence score based on the predicted parse text quality."""
     return {"good": 0.92, "medium": 0.78, "poor": 0.45}.get(quality, 0.5)
 
 
 def _priority_for_type(document_type: str) -> int:
+    """Assign job queue priority numbers to documents depending on type.
+
+    Prioritizes financial statements and annual reports over generic documents.
+    """
     return {
         "financial_statement": 100,
         "annual_report": 90,
@@ -260,7 +312,10 @@ def _priority_for_type(document_type: str) -> int:
 
 
 def _clean_items_to_chunks(items: list[dict[str, Any]]) -> list[Chunk]:
-    """Convert evidence_cleaner CleanEvidence dicts to Chunk objects for indexing."""
+    """Convert cleaned layout items from evidence_cleaner into standard Chunk objects.
+
+    Reconstructs tables and maps coordinates/provenance before the chunks are indexed.
+    """
     from app.services.chunker import Chunk as _Chunk
 
     chunks: list[Chunk] = []
