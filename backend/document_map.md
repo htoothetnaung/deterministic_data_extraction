@@ -22,7 +22,7 @@ This document provides a comprehensive mapping of the backend codebase, describi
 
 **What it does**: Manages the business logic orchestration and asynchronous workers.
 
-* **[production_pipeline.py](app/services/production_pipeline.py)**: Orchestrates the document parsing and vector indexing pipeline, executing Mistral OCR, saving page transcripts, cleaning layouts, and storing chunk embeddings.
+* **[production_ingestions.py](app/services/production_ingestions.py)**: Orchestrates the document parsing and vector indexing pipeline, executing Mistral OCR, saving page transcripts, cleaning layouts, and storing chunk embeddings.
 * **[production_extraction.py](app/services/production_extraction.py)**: Drives production RAG case extractions by calling retrieval search layers, assembling context prompts, and validating values against schemas.
 * **[worker.py](app/services/worker.py)**: Background queue processor daemon that polls enqueued document tasks and runs the parsing and vector indexing pipeline.
 

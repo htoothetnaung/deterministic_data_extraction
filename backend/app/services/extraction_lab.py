@@ -443,7 +443,7 @@ async def run_extraction_db(session: AsyncSession, payload: ExtractionRunRequest
     cleaned = evidence_cleaner.clean_parser_result(parser_result, max_pages=max(payload.max_pages or 200, len(chunks) and max(c.page for c in chunks) or 200))
     logger.info("extraction_lab: evidence_cleaner enabled=%s items=%d", cleaned.get('enabled'), len(cleaned.get('items', [])))
     if cleaned.get("enabled") and cleaned.get("items"):
-        from app.services.production_pipeline import _clean_items_to_chunks
+        from app.services.production_ingestions import _clean_items_to_chunks
         await index_chunks(
             session,
             case.case_id,
@@ -638,7 +638,7 @@ async def run_multi_document_extraction_db(
         all_chunks.extend(prefixed)
         cleaned = evidence_cleaner.clean_parser_result(_parser_result, max_pages=200)
         if cleaned.get("enabled") and cleaned.get("items"):
-            from app.services.production_pipeline import _clean_items_to_chunks
+            from app.services.production_ingestions import _clean_items_to_chunks
             await index_chunks(
                 session,
                 case.case_id,

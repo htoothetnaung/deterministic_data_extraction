@@ -665,8 +665,8 @@ def test_sanitize_cleans_list_values() -> None:
     assert all("**" not in str(v) for v in result)
 
 
-def test_production_pipeline_clean_items_to_chunks() -> None:
-    from app.services.production_pipeline import _clean_items_to_chunks
+def test_production_ingestions_clean_items_to_chunks() -> None:
+    from app.services.production_ingestions import _clean_items_to_chunks
 
     items = [
         {

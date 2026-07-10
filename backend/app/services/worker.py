@@ -10,7 +10,7 @@ import asyncio
 
 from app.db.engine import create_engine, get_factory, is_db_configured
 from app.db.repositories.job_repo import DocumentJobRepository
-from app.services.production_pipeline import parse_and_index_document
+from app.services.production_ingestions import parse_and_index_document
 
 
 async def poll_document_jobs(interval: float = 2.0) -> None:
