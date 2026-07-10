@@ -85,7 +85,7 @@ def test_latest_ok_result_for_input_rehydrates_output_and_ignores_failed(tmp_pat
 
 def test_cleaner_recovers_html_table_markdown_table_and_image() -> None:
     result = ParserRunResult(
-        library="paddleocr_vl_vllm",
+        library="mistral_ocr",
         input_file="sample.pdf",
         input_type="pdf",
         status=ParserStatus.OK,
@@ -101,7 +101,7 @@ def test_cleaner_recovers_html_table_markdown_table_and_image() -> None:
 | --- | --- |
 | Cash | 50 |
 
-![Chart](/api/parser-benchmarks/media/paddleocr_vl_vllm/a/page-001-image-01.jpg)
+![Chart](/api/parser-benchmarks/media/mistral_ocr/a/page-001-image-01.jpg)
 """,
     )
 

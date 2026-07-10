@@ -31,7 +31,7 @@ logger = logging.getLogger(__name__)
 DEFAULT_PRODUCTION_STRATEGY: ChunkStrategy = "page"
 
 # Order of candidate parsers to attempt for deep parsing.
-DEEP_PARSE_ORDER = ["mistral_ocr", "paddleocr_vl_vllm", "layout_pdfplumber", "docling", "pdfplumber", "pymupdf", "pypdf"]
+DEEP_PARSE_ORDER = ["mistral_ocr"]
 
 
 async def quick_parse_document(session: AsyncSession, document_id: str) -> DocumentModel:

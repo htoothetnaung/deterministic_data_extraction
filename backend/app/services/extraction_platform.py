@@ -404,7 +404,7 @@ def _parse_input(input_id: str) -> tuple[str, str, ParserRunResult]:
         raise HTTPException(status_code=404, detail="Parser input not found")
     if input_info.input_type == "text":
         return "plain_text", "Plain text", _parse_plain_text(Path(input_info.path), 12000)
-    for parser_id in ["paddleocr_vl", "paddle_ocr", "layout_pdfplumber", "pdfplumber", "pymupdf", "pypdf", "docling", "unstructured", "pillow"]:
+    for parser_id in ["mistral_ocr"]:
         module = PARSERS[parser_id]
         if input_info.input_type not in module.SUPPORTED_INPUT_TYPES or not module.is_available():
             continue

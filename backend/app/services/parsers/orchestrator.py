@@ -10,7 +10,7 @@ from fastapi import HTTPException
 
 from app.models.document import utcnow
 from app.models.parser_benchmark import ParserInfo, ParserRunRequest, ParserRunResponse, ParserRunResult
-from app.services.parsers import doclayout_yolo_demo, docling, layout_pdfplumber, mistral_ocr, paddle_ocr, paddleocr_vl, paddleocr_vl_local, paddleocr_vl_vllm, pdf_extract_kit, pdfplumber, pillow, pymupdf, pypdf, unstructured
+from app.services.parsers import mistral_ocr
 from app.services.parsers.base import failed_result, resolve_input
 from app.services.parsers.persistence import new_run_id, persist_run
 
@@ -29,7 +29,7 @@ class ParserModule(Protocol):
 
 PARSERS: dict[str, ParserModule] = {
     module.LIBRARY_ID: module
-    for module in (pypdf, pdfplumber, layout_pdfplumber, doclayout_yolo_demo, pymupdf, paddle_ocr, paddleocr_vl, paddleocr_vl_local, paddleocr_vl_vllm, docling, unstructured, pillow, pdf_extract_kit, mistral_ocr)
+    for module in (mistral_ocr,)
 }
 
 

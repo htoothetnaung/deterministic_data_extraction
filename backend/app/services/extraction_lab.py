@@ -97,11 +97,10 @@ STOPWORDS = {
     "with",
 }
 
-SUPPORTED_EXTRACTION_PARSERS = {"layout_pdfplumber", "mistral_ocr", "paddleocr_vl_vllm", "docling"}
+SUPPORTED_EXTRACTION_PARSERS = {"mistral_ocr"}
 # Mistral OCR is the primary parser: it produces the cleanest markdown for the
-# LLM extractor. The remaining entries are only fallbacks when Mistral is
-# unavailable or skips the input.
-AUTO_PARSER_ORDER = ["mistral_ocr", "paddleocr_vl_vllm", "layout_pdfplumber", "docling"]
+# LLM extractor.
+AUTO_PARSER_ORDER = ["mistral_ocr"]
 MAIN_PARSER_ID = "mistral_ocr"
 OPENAI_RECONSTRUCTION_MODEL = "gpt-5-mini"
 OPENAI_SCHEMA_MODEL = "gpt-5-mini"

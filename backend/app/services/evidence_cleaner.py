@@ -19,7 +19,7 @@ from app.services.parsers.base import preview_text
 logger = logging.getLogger(__name__)
 
 # List of parser libraries supported by the cleaner logic.
-SUPPORTED_CLEANUP_PARSERS = {"layout_pdfplumber", "mistral_ocr", "paddleocr_vl_vllm", "docling"}
+SUPPORTED_CLEANUP_PARSERS = {"mistral_ocr"}
 
 # Term list used to flag high-risk financial tables that require manual audit.
 FINANCIAL_TERMS = {
