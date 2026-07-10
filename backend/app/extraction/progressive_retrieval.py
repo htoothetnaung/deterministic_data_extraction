@@ -1,3 +1,9 @@
+"""Progressive retriever for adaptive RAG context search.
+
+Manages progressive expansion searches (expanding result limits, lifting filters,
+and falling back from vector queries to text keyword searches) to locate evidence
+when initial extraction passes fail.
+"""
 from __future__ import annotations
 
 import asyncio
@@ -19,12 +25,14 @@ _UNKNOWN = "unknown"
 
 @dataclass
 class RetrievalStats:
+    """Accumulates search logs and hits telemetry for an extraction run."""
     mode: str = _UNKNOWN
     total_dense_hits: int = 0
     total_sparse_hits: int = 0
     field_modes: list[str] = field(default_factory=list)
 
     def record(self, row_mode: str, dense_hits: int, sparse_hits: int) -> None:
+        """Update metrics with results from a single retrieval attempt."""
         self.total_dense_hits += dense_hits
         self.total_sparse_hits += sparse_hits
         self.field_modes.append(row_mode)
@@ -37,20 +45,33 @@ class RetrievalStats:
 
     @property
     def dense_hits(self) -> int:
+        """Count of pgvector vector database hits."""
         return self.total_dense_hits
 
     @property
     def sparse_hits(self) -> int:
+        """Count of full-text search index hits."""
         return self.total_sparse_hits
 
 
 class ProgressiveRetriever:
+    """Adaptive RAG retriever executing progressive query widening loops."""
+
     def __init__(self, evidence_repo: EvidenceRepository, *, use_api_embeddings: bool = False) -> None:
+        """Initialize the retriever, linking it to the pgvector EvidenceRepository."""
         self.evidence_repo = evidence_repo
         self.use_api_embeddings = use_api_embeddings
         self.retrieval_stats = RetrievalStats()
 
     async def retrieve(self, case_id: str, plan: FieldRetrievalPlan, attempt: int = 1) -> EvidencePack:
+        """Retrieve evidence chunks for a specific field, dynamically widening parameters on subsequent attempts.
+
+        Widenings:
+        * **Attempt 1**: Compact top_k=3, filtered strictly by preferred source types (e.g. table first).
+        * **Attempt 2**: Wider top_k=8, filters relaxed.
+        * **Attempt 3+**: Full budget top_k limits.
+        * **Embedding Failure**: Gracefully falls back to text-only sparse indexing if OpenAI is slow/failed.
+        """
         top_k = 3 if attempt == 1 else 8 if attempt == 2 else plan.budget.max_evidence_items
         source_filter = plan.preferred_source_types[0] if attempt == 1 and plan.preferred_source_types else None
         query_embedding: list[float] | None = None
@@ -97,5 +118,6 @@ class ProgressiveRetriever:
 
 
 def _plan_wants_images(plan: FieldRetrievalPlan) -> bool:
+    """Infer if the query intents to locate charts, visual components, or visual images."""
     haystack = f"{plan.field_path} {plan.query}".lower()
     return any(token in haystack for token in ("image", "images", "figure", "figures", "chart", "charts", "visual", "visuals"))

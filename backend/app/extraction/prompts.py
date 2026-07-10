@@ -1,3 +1,9 @@
+"""Prompt templates for structured extraction and schema design.
+
+Houses system and user prompts used to configure LLM agents for field extraction,
+grounded context validation, and automated schema generation.
+"""
+
 FIELD_EXTRACTION_PROMPT = """Extract one schema field using only the supplied evidence pack. Return supported candidates with evidence IDs."""
 
 FINANCIAL_EXTRACTION_SYSTEM_PROMPT = """You are an expert financial data extraction assistant. Your task is to extract structured information from the provided parser output of a financial/corporate document (e.g. credit rating rationales, financial statements, audits, annual reports).

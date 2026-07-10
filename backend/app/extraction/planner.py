@@ -1,3 +1,8 @@
+"""Planner for field retrieval and context limits.
+
+Parses target schema fields and associated hint inputs to generate structured
+retrieval plans (determining preferred formats, token limits, and query details).
+"""
 from __future__ import annotations
 
 import re
@@ -8,6 +13,7 @@ from app.extraction.context_budget import ContextBudget, budget_for_field
 
 @dataclass(frozen=True)
 class FieldRetrievalPlan:
+    """A generated plan to guide database RAG queries for a single target field."""
     field_path: str
     query: str
     expected_type: str
@@ -18,7 +24,14 @@ class FieldRetrievalPlan:
 
 
 class FieldRetrievalPlanner:
+    """Generates extraction search plans using schema structures and field hints."""
+
     def plan(self, field_path: str, field_schema: dict, hints: dict | None = None) -> FieldRetrievalPlan:
+        """Construct a query plan for a single field path.
+
+        Automatically routes financial/numerical metrics to prefer table structures
+        and configures context budgets.
+        """
         hints = hints or {}
         description = str(field_schema.get("description") or hints.get("description") or "")
         expected_type = str(field_schema.get("type") or hints.get("value_type") or "string")
@@ -40,5 +53,5 @@ class FieldRetrievalPlanner:
 
 
 def _tokens(value: str) -> list[str]:
+    """Split a text query into lower-case alphanumeric word tokens."""
     return [token for token in re.findall(r"[A-Za-z0-9]+", value.lower()) if len(token) > 1]
-

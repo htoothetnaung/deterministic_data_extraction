@@ -1,3 +1,8 @@
+"""Evidence pack manager for RAG context assemblies.
+
+Bundles retrieval results (text segments, reconstructed tables, page coordinate metadata)
+into a structured collection within token limits, preparing prompt inputs for LLMs.
+"""
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
@@ -8,6 +13,7 @@ from app.extraction.context_budget import ContextBudget
 
 @dataclass
 class EvidencePack:
+    """A structured collection of evidence chunks compiled for extracting a specific field."""
     field_path: str
     query: str
     text_snippets: list[dict[str, Any]] = field(default_factory=list)
@@ -16,18 +22,26 @@ class EvidencePack:
     retrieval_reason: str = "weighted_fts_vector"
 
     def model_dump(self) -> dict[str, Any]:
+        """Serialize the evidence pack to a dictionary."""
         return asdict(self)
 
     @property
     def evidence_ids(self) -> list[str]:
+        """Collect all distinct database evidence_id strings representing source citations."""
         return [str(item["evidence_id"]) for item in [*self.tables, *self.text_snippets] if item.get("evidence_id")]
 
 
 def estimate_tokens(text: str) -> int:
+    """Compute a fast estimation of text token sizes (typically 4 characters per token)."""
     return max(1, len(text) // 4)
 
 
 def build_evidence_pack(field_path: str, query: str, rows: list[dict[str, Any]], budget: ContextBudget) -> EvidencePack:
+    """Select, filter, and pack retrieval candidate rows into an EvidencePack within budget.
+
+    Ensures that total text tokens do not exceed `budget.max_text_tokens` and splits 
+    tables and raw text chunks into separate pools for target formatting.
+    """
     pack = EvidencePack(field_path=field_path, query=query)
     table_count = 0
     for row in rows:

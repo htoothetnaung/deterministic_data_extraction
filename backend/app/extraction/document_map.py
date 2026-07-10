@@ -29,6 +29,7 @@ _PAGE_MARKER = re.compile(r"<!--\s*page:\s*(\d+)\s*-->", re.I)
 
 @dataclass
 class CoverSection:
+    """Stores key values parsed from a document cover page."""
     title: str | None = None
     date: str | None = None
     entities: list[str] = field(default_factory=list)
@@ -36,6 +37,7 @@ class CoverSection:
 
 @dataclass
 class HeadingNode:
+    """A tree structure node representing markdown headers in a document."""
     level: int
     text: str
     page: int
@@ -44,6 +46,7 @@ class HeadingNode:
 
 @dataclass
 class TableEntry:
+    """Stores metadata and content of a parsed tabular layout item."""
     page: int
     caption: str | None = None
     nearby_heading: str | None = None
@@ -54,6 +57,7 @@ class TableEntry:
 
 @dataclass
 class ImageEntry:
+    """Stores page details and captions of visual page references."""
     page: int
     caption: str = ""
     url: str = ""
@@ -61,6 +65,7 @@ class ImageEntry:
 
 @dataclass
 class DocumentMap:
+    """High-level structural outline of the entire document."""
     cover: CoverSection
     heading_tree: list[HeadingNode]
     tables: list[TableEntry]
@@ -70,6 +75,7 @@ class DocumentMap:
     page_count: int = 0
 
     def full_text(self, max_chars: int | None = None) -> str:
+        """Concatenate all page text segments into a single string."""
         pages = sorted(self.page_text.keys())
         parts = [self.page_text[p] for p in pages]
         text = "\n\n".join(parts)
@@ -78,6 +84,10 @@ class DocumentMap:
         return text
 
     def compressed_context(self, max_chars: int = 24000) -> str:
+        """Create a compressed structural outline of headings, tables, cover data, and bounded raw texts.
+
+        Helps fit entire complex multi-page document maps into a single LLM prompt context window.
+        """
         sections: list[str] = []
 
         sections.append("=== COVER PAGE ===")
@@ -113,6 +123,7 @@ class DocumentMap:
         return "\n".join(sections)
 
     def _format_headings(self, nodes: list[HeadingNode], indent: int = 0) -> str:
+        """Recursively format the heading nodes tree into bullet points."""
         lines: list[str] = []
         for node in nodes:
             prefix = "  " * indent
@@ -123,6 +134,11 @@ class DocumentMap:
 
 
 def build_document_map(result: ParserRunResult) -> DocumentMap:
+    """Build a DocumentMap directly from the parser execution outputs.
+
+    Extracts cover fields, parses heading hierarchies, identifies tabular regions,
+    and lists images with page alignments.
+    """
     logger.info(
         "document_map: building doc_map parser=%s pages=%d chars=%d tables=%d images=%d",
         result.library, result.pages, result.chars, result.tables, result.images,
@@ -153,6 +169,7 @@ def build_document_map(result: ParserRunResult) -> DocumentMap:
 
 
 def _split_page_text(raw_text: str) -> dict[int, str]:
+    """Parse text structure to split contents by page numbers using parser page markers."""
     markers = list(_PAGE_MARKER.finditer(raw_text))
     if not markers:
         return {1: raw_text}
@@ -165,6 +182,7 @@ def _split_page_text(raw_text: str) -> dict[int, str]:
 
 
 def _extract_cover(page1_text: str, result: ParserRunResult | None = None) -> CoverSection:
+    """Extract cover page details (title, dates, corporate entity names) from the cover page text."""
     title = None
     m = _TITLE_RE.search(page1_text)
     if m:
@@ -193,6 +211,7 @@ def _extract_cover(page1_text: str, result: ParserRunResult | None = None) -> Co
 
 
 def _extract_headings(page_text: dict[int, str]) -> list[HeadingNode]:
+    """Parse heading tags (#, ##, ###) into a hierarchical tree of HeadingNode items."""
     all_headings: list[tuple[int, int, str]] = []
     for page, text in sorted(page_text.items()):
         for m in _HEADING_RE.finditer(text):
@@ -217,6 +236,7 @@ def _extract_headings(page_text: dict[int, str]) -> list[HeadingNode]:
 
 
 def _extract_tables(result: ParserRunResult, headings: list[HeadingNode]) -> list[TableEntry]:
+    """Locate tables from parser outputs and resolve nearby headings."""
     tables: list[TableEntry] = []
     blocks = result.structured_preview.get("blocks") if isinstance(result.structured_preview, dict) else None
     if isinstance(blocks, list):
@@ -248,6 +268,7 @@ def _extract_tables(result: ParserRunResult, headings: list[HeadingNode]) -> lis
 
 
 def _extract_images(result: ParserRunResult, full_text: str) -> list[ImageEntry]:
+    """Parse image markdown structures to build image list."""
     images: list[ImageEntry] = []
     for page, text in _split_page_text(full_text).items():
         for m in re.finditer(r"!\[([^\]]*)\]\(([^)]+)\)", text):
@@ -259,6 +280,7 @@ def _extract_images(result: ParserRunResult, full_text: str) -> list[ImageEntry]
 
 
 def _nearest_heading(headings: list[HeadingNode], page: int) -> str | None:
+    """Find the text of the heading closest in page alignment to a target table/image."""
     best = None
     best_dist = 999
     for node in _flatten_headings(headings):
@@ -270,6 +292,7 @@ def _nearest_heading(headings: list[HeadingNode], page: int) -> str | None:
 
 
 def _flatten_headings(nodes: list[HeadingNode]) -> list[HeadingNode]:
+    """Flatten tree heading structures into a 1D list."""
     flat: list[HeadingNode] = []
     for node in nodes:
         flat.append(node)
@@ -278,12 +301,15 @@ def _flatten_headings(nodes: list[HeadingNode]) -> list[HeadingNode]:
 
 
 def _count_headings(nodes: list[HeadingNode]) -> int:
+    """Recursively calculate the total count of headings."""
     return sum(1 + _count_headings(n.children) for n in nodes)
 
 
-def build_document_map_from_evidence(
-    evidence_items: list[dict[str, Any]],
-) -> DocumentMap:
+def build_document_map_from_evidence(evidence_items: list[dict[str, Any]]) -> DocumentMap:
+    """Reconstruct a DocumentMap outline using a list of database evidence_items dictionaries.
+
+    Organizes chunks back into cover sections, tables, heading trees, and pages.
+    """
     logger.info("document_map: building from %d evidence items", len(evidence_items))
     page_text: dict[int, str] = {}
     all_headings_raw: list[tuple[int, int, str]] = []
@@ -318,7 +344,6 @@ def build_document_map_from_evidence(
             images.append(ImageEntry(page=page, caption=text[:200], url=source_url or ""))
 
     headings = _build_heading_tree(all_headings_raw)
-
     cover = _extract_cover(page_text.get(1, ""), None)
 
     return DocumentMap(
@@ -332,6 +357,7 @@ def build_document_map_from_evidence(
 
 
 def _build_heading_tree(raw: list[tuple[int, int, str]]) -> list[HeadingNode]:
+    """Iteratively compile a raw 1D heading list into a nested HeadingNode tree."""
     if not raw:
         return []
     root: list[HeadingNode] = []

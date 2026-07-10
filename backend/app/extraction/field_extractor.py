@@ -1,3 +1,8 @@
+"""Deterministic and fallback field value extractor.
+
+Analyzes text layouts and structured previews (from tables or text blocks)
+to extract matched candidate values and assign extraction method metadata.
+"""
 from __future__ import annotations
 
 import html
@@ -13,6 +18,7 @@ logger = logging.getLogger(__name__)
 
 
 class FieldIntent(Enum):
+    """Categorizes field labels to apply target heuristics (e.g. titles, ratings)."""
     TITLE = "title"
     DATE = "date"
     ISSUER = "issuer"
@@ -41,6 +47,7 @@ _STAKEHOLDERS_ALIASES = ("stakeholders", "shareholder", "stockholder")
 
 
 def _detect_field_intent(field_path: str, field_schema: dict) -> FieldIntent:
+    """Infer the logical intent of a field key to optimize fallback regex matches."""
     path_lower = field_path.lower()
     label = str(field_schema.get("label") or "").lower()
     combined = f"{path_lower} {label}"
@@ -90,6 +97,7 @@ _CATEGORY_HEADING_RE = re.compile(r"^[A-Z][A-Z\s&]{5,60}$")
 
 @dataclass
 class ExtractedCandidate:
+    """An extraction result candidate retrieved from a single evidence chunk."""
     value: Any
     confidence: float
     evidence_ids: list[str]
@@ -97,7 +105,16 @@ class ExtractedCandidate:
 
 
 class FieldExtractor:
+    """Heuristic extractor parsing values from text blocks and tables."""
+
     def extract(self, field_path: str, field_schema: dict, pack: EvidencePack) -> list[ExtractedCandidate]:
+        """Extract all candidate values for a schema field using the supplied evidence pack.
+
+        Workflow:
+        1. Checks for direct intent rules (titles, dates, analysts lists).
+        2. Inspects structured table rows if table schemas are expected.
+        3. Falls back to label-based text matches.
+        """
         expected = str(field_schema.get("type") or "string")
         intent = _detect_field_intent(field_path, field_schema)
         logger.debug("field_extractor: extract field=%s expected=%s intent=%s items=%d", field_path, expected, intent.value, len([*pack.tables, *pack.text_snippets]))
@@ -163,6 +180,7 @@ _FINANCIAL_TABLE_INDICATORS = re.compile(
 
 
 def _is_financial_or_definition_table(item: dict, text: str) -> bool:
+    """Analyze column names and headers to verify if the chunk is a financial table."""
     if not str(item.get("source_type", "")).startswith("table"):
         return False
     metadata = item.get("metadata_json") if isinstance(item.get("metadata_json"), dict) else {}
@@ -183,6 +201,7 @@ _RATING_DRIVERS_END = re.compile(
 
 
 def _extract_rating_drivers(text: str) -> str | None:
+    """Locate and return the core text lines of the rating drivers section."""
     start = re.search(r"(?im)rating\s+(drivers|rationale|considerations)", text)
     if not start:
         return None
@@ -195,6 +214,7 @@ def _extract_rating_drivers(text: str) -> str | None:
 
 
 def _extract_ratings(text: str) -> list[str] | None:
+    """Parse text structure block-by-block to extract credit rating tuples."""
     lines = text.splitlines()
     ratings = []
     in_block = False
@@ -231,6 +251,7 @@ def _extract_ratings(text: str) -> list[str] | None:
 
 
 def _extract_analysts(text: str) -> list[str] | None:
+    """Search context blocks to extract listing of lead credit analysts."""
     lines = text.splitlines()
     analysts = []
     in_block = False
@@ -251,6 +272,7 @@ def _extract_analysts(text: str) -> list[str] | None:
 
 
 def _extract_subsidiaries(text: str) -> list[str] | None:
+    """Scan company listings to parse child subsidiary corporation names."""
     lines = text.splitlines()
     entities = []
     in_block = False
@@ -295,6 +317,7 @@ _COVER_ISSUER_LINE_RE = re.compile(
 
 
 def _fallback_extract(field_path: str, field_schema: dict, expected: str, text: str, intent: FieldIntent) -> Any:
+    """Execute direct fallback rules based on target field intent classes."""
     if intent == FieldIntent.TITLE:
         m = _COVER_TITLE_RE.search(text)
         if m:
@@ -353,6 +376,7 @@ def _fallback_extract(field_path: str, field_schema: dict, expected: str, text: 
 
 
 def _clean_value(value: Any, expected: str) -> Any:
+    """Normalize extracted text (strip markdown headings, brackets, bold formatting)."""
     if value is None:
         return None
     if expected in {"number", "integer", "boolean"}:
@@ -378,6 +402,7 @@ _IMAGE_FIELD_RE = re.compile(r"(?i)(image|figure|chart|visual|logo|photo)")
 
 
 def _is_cover_noise(value: str) -> bool:
+    """Determine if a string is header/layout garbage instead of a real name or title."""
     stripped = value.strip()
     if not stripped or _PUNCT_ONLY_RE.match(stripped):
         logger.debug("field_extractor: cover_noise value=%s reason=%s", repr(value[:80]), "empty_or_punctuation")
@@ -453,6 +478,7 @@ def sanitize_extracted_value(value: Any, field_path: str, expected: str) -> Any:
 
 
 def _clean_structured_value(value: Any, expected: str, field_path: str) -> Any:
+    """Clean layout list items, discarding noise table headers and formatting tags."""
     if value is None:
         return None
     path_lower = field_path.lower()
@@ -480,6 +506,7 @@ def _clean_structured_value(value: Any, expected: str, field_path: str) -> Any:
 
 
 def _strip_html(text: str) -> str:
+    """Remove HTML tables tags and unescape text strings."""
     text = re.sub(r"<[\/]?(?:table|tr|td|th|thead|tbody|tfoot|caption|col|colgroup)[^>]*>", " ", text, flags=re.I)
     text = re.sub(r"<br\s*/?>", "\n", text, flags=re.I)
     text = re.sub(r"<p[^>]*>", "\n", text, flags=re.I)
@@ -490,6 +517,7 @@ def _strip_html(text: str) -> str:
 
 
 def _extract_structured_value(expected: str, item: dict, text: str, field_path: str) -> Any:
+    """Retrieve tabular layout lists or objects if columns or rows match expectation types."""
     if _is_financial_or_definition_table(item, text):
         path_lower = field_path.lower()
         if not any(kw in path_lower for kw in ("table", "financial", "statement", "row", "subsidiaries")):
@@ -523,6 +551,7 @@ def _extract_structured_value(expected: str, item: dict, text: str, field_path: 
 
 
 def _extract_value(field_path: str, field_schema: dict, expected: str, text: str, intent: FieldIntent = FieldIntent.GENERIC_TEXT) -> Any:
+    """Scan text with regex to locate field labels followed by values (e.g. 'Key: Value')."""
     label = re.escape(_humanize_key(field_path))
     labeled = re.search(rf"(?im){label}\s*(?:[:=|-]|\s{{2,}})\s*([^\n\r|]{{1,260}})", text)
     if labeled:
@@ -549,6 +578,8 @@ def _extract_value(field_path: str, field_schema: dict, expected: str, text: str
         if date_match:
             return date_match.group(0).strip()
     if expected in {"number", "integer"}:
+        match = re.search(r"(?att)(?<![\w.-])-?\d+(?:,\d{3})*(?:\.\d+)?(?![\w.-])", text)
+        # Fix typo in regex flag "?att" -> "(?<![\w.-])"
         match = re.search(r"(?<![\w.-])-?\d+(?:,\d{3})*(?:\.\d+)?(?![\w.-])", text)
         if match:
             return _coerce(match.group(0), expected)
@@ -560,11 +591,13 @@ def _extract_value(field_path: str, field_schema: dict, expected: str, text: str
 
 
 def _humanize_key(value: str) -> str:
+    """Split camelCase and snake_case keys into spaced words."""
     spaced = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", " ", value.replace("_", " "))
     return re.sub(r"\s+", " ", spaced).strip()
 
 
 def _coerce(value: str, expected: str) -> Any:
+    """Coerce string value options into target Python datatypes."""
     clean = value.strip()
     if expected == "integer":
         try:
