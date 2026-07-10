@@ -10,7 +10,7 @@ import asyncio
 
 from app.db.engine import create_engine, get_factory, is_db_configured
 from app.db.repositories.job_repo import DocumentJobRepository
-from app.services.production_pipeline import deep_parse_document, index_document_evidence, quick_parse_document
+from app.services.production_pipeline import parse_and_index_document
 
 
 async def poll_document_jobs(interval: float = 2.0) -> None:
@@ -20,9 +20,7 @@ async def poll_document_jobs(interval: float = 2.0) -> None:
     1. Claims the next pending task from the database queue in a concurrency-safe manner
        (preventing multiple worker threads from picking up the same document).
     2. Invokes the appropriate stage of the production pipeline based on `job.task_type`:
-       * 'quick_parse': Quick metadata extraction (file size, page counts, type detection).
-       * 'deep_parse': Heavyweight OCR and structural layout text/table parsing.
-       * 'index': OpenAI vector embedding computation and HNSW indexing.
+       * 'parse_and_index': Executes unified parsing, layout cleaning, and vector indexing.
     3. If the stage completes successfully, marks the job status as 'completed'.
     4. If an exception occurs, rolls back the active transaction and marks the job status
        as 'failed', logging the raw error traceback.
@@ -41,12 +39,8 @@ async def poll_document_jobs(interval: float = 2.0) -> None:
                 await asyncio.sleep(interval)
                 continue
             try:
-                if job.task_type == "quick_parse":
-                    await quick_parse_document(session, job.document_id)
-                elif job.task_type == "deep_parse":
-                    await deep_parse_document(session, job.document_id)
-                elif job.task_type == "index":
-                    await index_document_evidence(session, job.document_id)
+                if job.task_type in {"parse_and_index", "quick_parse", "deep_parse", "index"}:
+                    await parse_and_index_document(session, job.document_id)
                 await repo.complete(job.job_id)
                 await session.commit()
             except Exception as exc:

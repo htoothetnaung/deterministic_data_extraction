@@ -34,53 +34,15 @@ DEFAULT_PRODUCTION_STRATEGY: ChunkStrategy = "page"
 DEEP_PARSE_ORDER = ["mistral_ocr"]
 
 
-async def quick_parse_document(session: AsyncSession, document_id: str) -> DocumentModel:
-    """Perform cheap structural parsing on a newly uploaded document.
+async def parse_and_index_document(session: AsyncSession, document_id: str, parser_id: str | None = None) -> DocumentModel:
+    """Execute the full document parsing and vector indexing pipeline.
 
-    Runs quickly using local libraries (e.g. fitz/zipfile) to extract basic info:
-    * Page count.
-    * Initial preview text.
-    * Inferred document type (invoice, contract, annual report) based on keywords.
-    * Queue priority based on type.
-
-    Once finished, it enqueues a 'deep_parse' task in the database queue for the worker.
-    """
-    repo = DocumentRepository(session)
-    doc = await repo.get(document_id)
-    if doc is None:
-        raise ValueError(f"Document not found: {document_id}")
-    if not doc.storage_path:
-        raise ValueError(f"Document has no storage_path: {document_id}")
-
-    parsed = document_parser.parse_document(doc.storage_path)
-    inferred = {
-        **(doc.inferred_metadata or {}),
-        "document_type": parsed.get("document_type") or "other",
-        "first_page_text": str(parsed.get("first_page_text") or "")[:2000],
-    }
-    priority = _priority_for_type(inferred["document_type"])
-    await repo.update_parser_status(
-        document_id,
-        "quick_parsed",
-        page_count=int(parsed.get("page_count") or 1),
-        inferred_metadata=inferred,
-        priority=priority,
-    )
-    await repo.enqueue_job(document_id, "deep_parse", priority=priority)
-    await session.commit()
-    return doc
-
-
-async def deep_parse_document(session: AsyncSession, document_id: str, parser_id: str | None = None) -> DocumentModel:
-    """Execute the main OCR and parsing pipeline on the document.
-
-    Steps:
-    1. Runs the deep parser cascade (Mistral, Docling, PaddleOCR) until one succeeds.
-    2. Inserts page text transcripts into the database (`PageModel`).
-    3. Feeds raw text/layouts to `evidence_cleaner` to filter headers, reconstruct tables, and extract images.
-    4. If the cleaner is supported for the parser result, maps output to `evidence_items` and flushes.
-    5. If unsupported, falls back to the standard page-by-page `chunker.py` to index the raw text.
-    6. Updates document status to 'parsed' and enqueues an 'index' (embedding) job.
+    Workflow:
+    1. Runs the Mistral OCR parser (via `_run_parser`) to extract layout blocks.
+    2. Stores raw page transcripts into PageModel.
+    3. Normalizes parser results using `evidence_cleaner.clean_parser_result`.
+    4. Automatically generates OpenAI dense embeddings and persists chunks into the pgvector evidence index.
+    5. Shifts document state directly to `"indexed"`.
     """
     repo = DocumentRepository(session)
     doc = await repo.get(document_id)
@@ -91,7 +53,7 @@ async def deep_parse_document(session: AsyncSession, document_id: str, parser_id
 
     result_parser_id, result = _run_parser(Path(doc.storage_path), parser_id)
     logger.info(
-        "deep_parse_document: parser=%s pages=%d chars=%d tables=%d images=%d",
+        "parse_and_index_document: parser=%s pages=%d chars=%d tables=%d images=%d",
         result_parser_id, result.pages or 0, result.chars or 0,
         result.tables or 0, result.images or 0,
     )
@@ -103,7 +65,7 @@ async def deep_parse_document(session: AsyncSession, document_id: str, parser_id
     cleaned = evidence_cleaner.clean_parser_result(result, max_pages=result.pages or 200)
     if cleaned.get("enabled") and cleaned.get("items"):
         logger.info(
-            "deep_parse_document: cleaner enabled, items=%d",
+            "parse_and_index_document: cleaner enabled, items=%d",
             len(cleaned["items"]),
         )
         chunk_dicts = cleaned["items"]
@@ -117,7 +79,7 @@ async def deep_parse_document(session: AsyncSession, document_id: str, parser_id
             replace_existing=True,
         )
         logger.info(
-            "deep_parse_document: indexed %d cleaned evidence items (cleaner=%s), "
+            "parse_and_index_document: indexed %d cleaned evidence items (cleaner=%s), "
             "openai_embeddings=%d, skipped_empty=%d",
             stats.chunks_indexed,
             cleaned.get("strategy", "unknown"),
@@ -126,7 +88,7 @@ async def deep_parse_document(session: AsyncSession, document_id: str, parser_id
         )
     else:
         logger.info(
-            "deep_parse_document: cleaner disabled, reason=%s, falling back to raw chunker",
+            "parse_and_index_document: cleaner disabled, reason=%s, falling back to raw chunker",
             cleaned.get("reason", "unknown"),
         )
         chunks = chunk_parser_result(
@@ -135,7 +97,7 @@ async def deep_parse_document(session: AsyncSession, document_id: str, parser_id
             config=ChunkConfig(max_pages=200),
         )
         logger.info(
-            "deep_parse_document: document_id=%s parser=%s pages=%d chunks=%d (cleaner disabled, fallback to raw chunker)",
+            "parse_and_index_document: document_id=%s parser=%s pages=%d chunks=%d (cleaner disabled, fallback to raw chunker)",
             document_id,
             result_parser_id,
             result.pages or 1,
@@ -151,7 +113,7 @@ async def deep_parse_document(session: AsyncSession, document_id: str, parser_id
             replace_existing=True,
         )
         logger.info(
-            "deep_parse_document: indexed %d chunks, openai_embeddings=%d, skipped_empty=%d",
+            "parse_and_index_document: indexed %d chunks, openai_embeddings=%d, skipped_empty=%d",
             stats.chunks_indexed,
             stats.openai_embeddings,
             stats.skipped_empty,
@@ -160,38 +122,12 @@ async def deep_parse_document(session: AsyncSession, document_id: str, parser_id
     parse_quality = _quality_from_result(result)
     await repo.update_parser_status(
         document_id,
-        "parsed",
+        "indexed",
         parse_quality=parse_quality,
         confidence=_confidence_for_quality(parse_quality),
         page_count=max(doc.page_count, result.pages or 1),
         inferred_metadata={**(doc.inferred_metadata or {}), "parser_id": result_parser_id},
     )
-    await repo.enqueue_job(document_id, "index", priority=doc.priority)
-    await session.commit()
-    return doc
-
-
-async def index_document_evidence(session: AsyncSession, document_id: str) -> DocumentModel:
-    """Compute dense vector embeddings in batch for all text evidence items.
-
-    Retrieves all evidence items parsed from the document, batches their text through the
-    OpenAI embedding API, saves the vector coordinates in `evidence_embeddings`, and marks
-    the document as 'indexed' (fully ready for RAG query searches).
-    """
-    repo = DocumentRepository(session)
-    doc = await repo.get(document_id)
-    if doc is None:
-        raise ValueError(f"Document not found: {document_id}")
-    evidence_repo = EvidenceRepository(session)
-    items = await evidence_repo.list_by_document(document_id)
-    text_items = [item for item in items if (item.text or item.markdown or "").strip()]
-    texts = [(item.text or item.markdown or "")[:8000] for item in text_items]
-    if texts:
-        vectors = embed_texts(texts)
-        for item, vector in zip(text_items, vectors):
-            await evidence_repo.set_embedding(item.evidence_id, vector)
-            await evidence_repo.refresh_search_vector(item.evidence_id)
-    await repo.update_parser_status(document_id, "indexed")
     await session.commit()
     return doc
 

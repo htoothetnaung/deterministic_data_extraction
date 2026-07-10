@@ -12,6 +12,7 @@ import logging
 from typing import Any, BinaryIO
 
 from fastapi import HTTPException
+from app.services.parsers import quick as document_parser
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -124,7 +125,37 @@ async def attach_upload_to_case_db(
         user_metadata=user_metadata or {},
         inferred_metadata=inferred,
     )
-    await repo.enqueue_job(document_id, "quick_parse")
+
+    # Synchronously resolve initial page count and document type via quick parser
+    page_count = 1
+    doc_type = "other"
+    if storage_path:
+        try:
+            parsed = document_parser.parse_document(Path(storage_path))
+            page_count = int(parsed.get("page_count") or 1)
+            doc_type = parsed.get("document_type") or "other"
+        except Exception:
+            pass
+
+    inferred["document_type"] = doc_type
+    priority_map = {
+        "financial_statement": 100,
+        "annual_report": 90,
+        "bank_statement": 80,
+        "proxy_form": 50,
+    }
+    priority = priority_map.get(doc_type, 10)
+
+    # Update state to processing and enqueued
+    await repo.update_parser_status(
+        document_id,
+        status="processing",
+        page_count=page_count,
+        priority=priority,
+        inferred_metadata=inferred,
+    )
+    await repo.enqueue_job(document_id, "parse_and_index", priority=priority)
+
     case.status = "parsing"
     await session.commit()
     return _document_model(doc)
