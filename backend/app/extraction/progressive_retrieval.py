@@ -62,7 +62,7 @@ class ProgressiveRetriever:
         except Exception as e:
             logger.warning("progressive_retrieval: embed_text field=%s attempt=%d failed=%s", plan.field_path, attempt, e)
             pass
-
+            
         rows = await self.evidence_repo.hybrid_search(
             case_id=case_id,
             query=plan.query,
