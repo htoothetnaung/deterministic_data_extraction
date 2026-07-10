@@ -53,7 +53,6 @@ from app.models.extraction_lab import (
     ExtractionLabSchemaTemplate,
     MultiDocumentExtractionRunRequest,
     MultiDocumentExtractionRunResponse,
-    MultiDocumentMode,
     ExtractionRunRequest,
     ExtractionRunResponse,
     ExtractionRunStats,
@@ -213,7 +212,7 @@ def generate_schema_definition(payload: SchemaGenerationRequest) -> SchemaGenera
 
     api_key = _openai_api_key()
     if api_key:
-        schema = _call_openai_schema_generator(api_key, query, evidence, payload.multi_document_mode)
+        schema = _call_openai_schema_generator(api_key, query, evidence)
     else:
         warnings.append("OPENAI_API_KEY is not set; generated a deterministic draft from parser evidence only.")
         schema = _fallback_schema_from_context(query, evidence)
@@ -574,193 +573,35 @@ async def run_multi_document_extraction_db(
     session: AsyncSession,
     payload: MultiDocumentExtractionRunRequest,
 ) -> MultiDocumentExtractionRunResponse:
-    """Run batch extraction over multiple documents.
-
-    Supports two modes:
-    * `PER_DOCUMENT`: Runs separate standalone extractions for each document concurrently.
-    * `CROSS_DOCUMENT` (Bundle): Combines chunks from all documents into a single case,
-       allowing the schema-constrained LLM to query and aggregate metrics across multiple files
-       simultaneously (e.g. comparing annual reports from consecutive years).
-    """
+    """Run per-document batch extraction over multiple documents."""
     input_ids = list(dict.fromkeys(payload.input_ids))
-    logger.info("extraction_lab: multi_doc mode=%s documents=%d", payload.multi_document_mode, len(input_ids))
-    if payload.multi_document_mode == MultiDocumentMode.PER_DOCUMENT:
-        # Enforce pre-parsed check for all documents in the batch
-        for input_id in input_ids:
-            single = _single_payload(payload, input_id)
-            if not _has_existing_parser_result(single):
-                input_info = resolve_input(input_id)
-                fname = input_info.name if input_info else input_id
-                raise HTTPException(
-                    status_code=400,
-                    detail=f"Document '{fname}' has not been parsed yet. Please run parsing first."
-                )
+    logger.info("extraction_lab: multi_doc per_document documents=%d", len(input_ids))
 
-        import asyncio
-        from app.db.engine import get_factory
-        session_creator = get_factory()
-
-        async def run_single(input_id):
-            async with session_creator() as local_session:
-                return await run_extraction_db(local_session, _single_payload(payload, input_id))
-
-        tasks = [run_single(input_id) for input_id in input_ids]
-        results = await asyncio.gather(*tasks)
-        return MultiDocumentExtractionRunResponse(mode=payload.multi_document_mode, results=results)
-
-    start = time.perf_counter()
-    started_at = utcnow()
-    docs: list[tuple[ParserInputInfo, str, str, ParserRunResult, datetime | None, list[SourceChunk]]] = []
     for input_id in input_ids:
         single = _single_payload(payload, input_id)
         input_info = resolve_input(input_id)
         if not input_info:
             raise HTTPException(status_code=404, detail=f"Extraction input not found: {input_id}")
-        parser_id, parser_name, parser_result, parser_run_started_at = _load_parser_result(single)
-        chunks = _build_chunks(parser_result, payload.max_pages, single)
-        if not chunks:
-            chunks = [SourceChunk(id="document-1", page=1, type="text", text=parser_result.raw_text or parser_result.text_preview or "")]
-        docs.append((input_info, parser_id, parser_name, parser_result, parser_run_started_at, chunks))
-
-    case = await CaseRepository(session).create(
-        title=f"Extraction Lab Bundle: {len(docs)} documents",
-        metadata_json={"synthetic": True, "input_ids": input_ids, "mode": payload.multi_document_mode},
-    )
-    all_chunks: list[SourceChunk] = []
-    for input_info, _parser_id, _parser_name, _parser_result, _started, chunks in docs:
-        doc = await DocumentRepository(session).create(
-            case_id=case.case_id,
-            filename=input_info.name,
-            mime_type=input_info.input_type,
-            size_bytes=input_info.size_bytes,
-            user_metadata={"synthetic_extraction_lab": True, "input_id": input_info.id},
-        )
-        prefixed = [_prefix_chunk(chunk, doc.document_id) for chunk in chunks]
-        all_chunks.extend(prefixed)
-        cleaned = evidence_cleaner.clean_parser_result(_parser_result, max_pages=200)
-        if cleaned.get("enabled") and cleaned.get("items"):
-            from app.services.production_ingestions import _clean_items_to_chunks
-            await index_chunks(
-                session,
-                case.case_id,
-                doc.document_id,
-                _clean_items_to_chunks(cleaned["items"]),
-                embed_openai=True,
-                embed_api=False,
-                replace_existing=True,
-            )
-        else:
-            await index_chunks(
-                session,
-                case.case_id,
-                doc.document_id,
-                [_source_chunk_to_chunk(chunk) for chunk in prefixed],
-                embed_openai=True,
-                embed_api=False,
-                replace_existing=True,
+        if not _has_existing_parser_result(single):
+            raise HTTPException(
+                status_code=400,
+                detail=f"Document '{input_info.name}' has not been parsed yet. Please run parsing first.",
             )
 
-        logger.info("extraction_lab: indexed document=%s", doc.document_id)
+    import asyncio
+    from app.db.engine import get_factory
 
-    search_schema = _schema_with_query(payload.output_schema, payload.natural_language_query)
-    cache_key = _deterministic_cache_key(
-        payload,
-        "multi",
-        ParserRunResult(
-            result_id="multi",
-            run_id=",".join(item[3].run_id or "" for item in docs),
-            library="multi",
-            input_file=",".join(item[0].name for item in docs),
-            input_type="bundle",
-            status=ParserStatus.OK,
-            seconds=0,
-            pages=sum(item[3].pages for item in docs),
-            chars=sum(item[3].chars for item in docs),
-            tables=sum(item[3].tables for item in docs),
-            images=sum(item[3].images for item in docs),
-            text_preview=",".join(item[3].run_id or "" for item in docs),
-        ),
-    )
-    cached = _read_cached_result(cache_key)
-    if cached:
-        return MultiDocumentExtractionRunResponse(mode=payload.multi_document_mode, results=[cached.model_copy(update={"warnings": [*cached.warnings, "deterministic_cache_hit"]})])
-    engine_result = await run_case_extraction_db(
-        session,
-        case.case_id,
-        ExtractionRequest(
-            schema_id=payload.output_schema.name or "extraction_lab_bundle",
-            output_schema=_lab_schema_to_json_schema(search_schema),
-            max_evidence_per_field=payload.max_candidates_per_field,
-            settings=payload.settings,
-        ),
-        agentic=True,
-    )
-    fields, data, candidates_scanned = await _lab_fields_from_engine(session, payload.output_schema, engine_result)
-    model_name, dynamic_model, generated_code = _build_pydantic_model(payload.output_schema)
-    validation_errors = _validate_required(payload.output_schema, data)
-    try:
-        data = dynamic_model.model_validate(data).model_dump(mode="json", by_alias=True)
-    except ValidationError as exc:
-        validation_errors.extend(_format_validation_errors(exc))
-        data = _json_safe(data)
+    session_creator = get_factory()
+    concurrency_limit = 4
+    semaphore = asyncio.Semaphore(concurrency_limit)
 
-    consistency = _consistency_from_engine(engine_result)
-    retrieval_stats = _retrieval_stats_from_engine(engine_result)
-    total_seconds = time.perf_counter() - start
-    bundle_input = ParserInputInfo(
-        id="bundle:" + ",".join(input_ids),
-        name=f"{len(docs)} document bundle",
-        input_type="bundle",
-        size_bytes=sum(item[0].size_bytes for item in docs),
-        path="",
-        page_count=sum(item[3].pages for item in docs),
-    )
-    result = ExtractionRunResponse(
-        run_id=engine_result.job_id,
-        input=bundle_input,
-        parser_id="multi",
-        parser_name="Multi-document",
-        parser_run_id=None,
-        parser_run_started_at=docs[0][4] if docs else None,
-        extraction_tier=payload.extraction_tier,
-        schema_model_name=model_name,
-        schema_definition=payload.output_schema.model_dump(mode="json"),
-        natural_language_query=payload.natural_language_query,
-        data=data,
-        fields=fields,
-        chunks=[_chunk_to_extraction_chunk(chunk) for chunk in all_chunks[:300]],
-        validation_errors=validation_errors,
-        warnings=[f"path_b_job_id:{engine_result.job_id}", f"cross_document_inputs:{len(docs)}"],
-        generated_code=generated_code,
-        stats=ExtractionRunStats(
-            parser_seconds=sum(item[3].seconds for item in docs),
-            total_seconds=round(total_seconds, 4),
-            pages=sum(item[3].pages for item in docs),
-            chunks=len(all_chunks),
-            fields=len(payload.output_schema.fields),
-            candidates_scanned=candidates_scanned,
-            chunking_strategy=payload.chunking_strategy,
-            chunk_tokens=sum(chunk.token_count or 0 for chunk in all_chunks),
-            retrieval_mode=str(retrieval_stats.get("retrieval_mode") or "unknown"),
-            dense_hits=int(retrieval_stats.get("dense_hits") or 0),
-            sparse_hits=int(retrieval_stats.get("sparse_hits") or 0),
-            null_fields_detected=int(consistency.get("null_fields_detected") or 0),
-            null_retries=int(consistency.get("null_retries") or 0),
-            recovered_nulls=int(consistency.get("recovered_nulls") or 0),
-            candidate_conflicts=int(consistency.get("candidate_conflicts") or 0),
-            critic_issues=int(consistency.get("critic_issue_count") or 0),
-            consistency_score=float(consistency.get("consistency_score") or 1.0),
-            agentic_used=True,
-            adk_available=bool(consistency.get("adk_available")),
-            model_used=consistency.get("model_used") if isinstance(consistency.get("model_used"), str) else None,
-        ),
-        started_at=started_at,
-        finished_at=utcnow(),
-    )
-    if not result.validation_errors:
-        _write_cached_result(cache_key, result)
-    await _save_extraction_result_to_db(session, "bundle:" + ",".join(input_ids), result)
-    return MultiDocumentExtractionRunResponse(mode=payload.multi_document_mode, results=[result])
+    async def run_single(input_id: str) -> ExtractionRunResponse:
+        async with semaphore:
+            async with session_creator() as local_session:
+                return await run_extraction_db(local_session, _single_payload(payload, input_id))
+
+    results = await asyncio.gather(*(run_single(input_id) for input_id in input_ids))
+    return MultiDocumentExtractionRunResponse(results=results)
 
 
 def _single_payload(payload: MultiDocumentExtractionRunRequest, input_id: str) -> ExtractionRunRequest:
@@ -812,10 +653,6 @@ def _read_cached_result(cache_key: str) -> ExtractionRunResponse | None:
 def _write_cached_result(cache_key: str, result: ExtractionRunResponse) -> None:
     path = _deterministic_cache_dir() / f"{cache_key}.json"
     path.write_text(result.model_dump_json(indent=2), encoding="utf-8")
-
-
-def _prefix_chunk(chunk: SourceChunk, document_id: str) -> SourceChunk:
-    return SourceChunk(**{**chunk.__dict__, "id": f"{document_id}:{chunk.id}"})
 
 
 def _load_parser_result(payload: ExtractionRunRequest) -> tuple[str, str, ParserRunResult, datetime | None]:
@@ -1346,11 +1183,10 @@ def _call_openai_schema_generator(
     api_key: str,
     query: str,
     evidence: list[dict[str, Any]],
-    mode: MultiDocumentMode,
 ) -> ExtractionLabSchema:
     prompt = {
         "natural_language_request": query,
-        "document_mode": mode,
+        "document_mode": "per_document",
         "documents": evidence[:60],
         "allowed_output_shape": {
             "name": "PascalCase model name",

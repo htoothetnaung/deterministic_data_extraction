@@ -16,7 +16,6 @@ from app.models.extraction_lab import (
     ExtractionLabSchemaTemplate,
     MultiDocumentExtractionRunRequest,
     MultiDocumentExtractionRunResponse,
-    MultiDocumentMode,
     ExtractionReportRequest,
     ExtractionReportResponse,
     ExtractionRunRequest,
@@ -199,18 +198,16 @@ async def run(payload: ExtractionRunRequest):
 async def run_multi(payload: MultiDocumentExtractionRunRequest):
     """Execute batch extractions over multiple documents.
 
-    Supports concurrent single document extractions (PER_DOCUMENT) or bundle aggregations (CROSS_DOCUMENT).
+    Runs one extraction per selected document.
     """
     if is_db_configured():
         async with get_factory()() as session:
             return await run_multi_document_extraction_db(session, payload)
-    if payload.multi_document_mode != MultiDocumentMode.PER_DOCUMENT:
-        raise HTTPException(status_code=422, detail="Cross-document extraction requires the DB-backed evidence index")
     results = [
         run_extraction(ExtractionRunRequest(**{**payload.model_dump(mode="python"), "input_id": input_id}))
         for input_id in dict.fromkeys(payload.input_ids)
     ]
-    return MultiDocumentExtractionRunResponse(mode=payload.multi_document_mode, results=results)
+    return MultiDocumentExtractionRunResponse(results=results)
 
 
 @router.post("/generate-schema", response_model=SchemaGenerationResponse)
@@ -252,6 +249,7 @@ async def get_history():
     async with get_factory()() as session:
         from sqlalchemy import select
         from sqlalchemy.orm import selectinload
+        from app.db.compat import ensure_runtime_settings_columns
         from app.db.models import (
             CaseModel,
             ExtractionJobModel,
@@ -259,6 +257,9 @@ async def get_history():
             FieldAttemptModel,
             FieldResultModel,
         )
+
+        await ensure_runtime_settings_columns(session)
+        await session.commit()
 
         stmt = (
             select(ExtractionJobModel)

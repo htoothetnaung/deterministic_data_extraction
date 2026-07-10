@@ -1,6 +1,8 @@
 """Job repositories for extraction and document queue."""
 from __future__ import annotations
 
+import json
+from decimal import Decimal
 from datetime import datetime, timezone
 from typing import Any
 
@@ -9,6 +11,19 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models import ExtractionJobModel, FieldResultModel, FieldCandidateModel, FieldAttemptModel, DocumentJobModel
 from app.db.repositories.base import BaseRepository
+
+
+def _json_safe(value: Any) -> Any:
+    """Return a JSON-compatible copy for JSONB persistence."""
+    return json.loads(json.dumps(value, default=_json_default))
+
+
+def _json_default(value: Any) -> Any:
+    if isinstance(value, Decimal):
+        return float(value)
+    if isinstance(value, datetime):
+        return value.isoformat()
+    return str(value)
 
 
 # =====================================================================
@@ -143,7 +158,7 @@ class ExtractionJobRepository(BaseRepository[ExtractionJobModel]):
         attempt = FieldAttemptModel(
             field_result_id=field_result_id,
             attempt_number=attempt_number,
-            evidence_pack=evidence_pack or {},
+            evidence_pack=_json_safe(evidence_pack or {}),
             input_tokens=input_tokens,
             output_tokens=output_tokens,
             model_used=model_used,

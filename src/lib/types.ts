@@ -341,15 +341,12 @@ export interface ExtractionRunRequest {
   extraction_tier: "cost_effective" | "agentic" | "agentic_plus";
 }
 
-export type MultiDocumentMode = "per_document" | "cross_document";
-
 export interface MultiDocumentExtractionRunRequest extends ExtractionRunRequest {
   input_ids: string[];
-  multi_document_mode: MultiDocumentMode;
 }
 
 export interface MultiDocumentExtractionRunResponse {
-  mode: MultiDocumentMode;
+  mode: "per_document";
   results: ExtractionRunResponse[];
 }
 
@@ -357,7 +354,6 @@ export interface SchemaGenerationRequest {
   input_ids: string[];
   natural_language_query?: string | null;
   parser_id: string;
-  multi_document_mode: MultiDocumentMode;
   chunking_strategy: ChunkingStrategy;
   chunk_size: number;
   chunk_overlap: number;

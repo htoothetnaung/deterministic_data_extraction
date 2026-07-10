@@ -17,6 +17,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models import DocumentModel, EvidenceItemModel, ExtractionJobModel, FieldCandidateModel, FieldResultModel
+from app.db.compat import ensure_runtime_settings_columns
 from app.db.repositories.case_repo import CaseRepository
 from app.db.repositories.document_repo import DocumentRepository
 from app.db.repositories.evidence_repo import EvidenceRepository
@@ -226,6 +227,9 @@ async def run_case_extraction_db(
     if schema is None:
         schema = {"type": "object", "properties": {}}
 
+    await ensure_runtime_settings_columns(session)
+    await session.commit()
+
     case = await CaseRepository(session).get(case_id)
     case_settings_dict = getattr(case, "settings", None) or {}
     request_settings = payload.settings or {}
@@ -237,6 +241,7 @@ async def run_case_extraction_db(
 
     job_repo = ExtractionJobRepository(session)
     job = await job_repo.create_job(case_id=case_id, schema_id=payload.schema_id, schema_json=schema)
+    job_id = job.job_id
     job.settings = settings_obj.model_dump()
     job.status = "running"
     await session.commit()
@@ -374,11 +379,12 @@ async def run_case_extraction_db(
             started_at=job.started_at or utcnow(),
             completed_at=job.completed_at,
         )
-    except Exception as e:
-        logger.exception("production_extraction: failed case=%s job=%s", case_id, job.job_id)
-        await job_repo.update_status(job.job_id, "failed")
+    except Exception:
+        logger.exception("production_extraction: failed case=%s job=%s", case_id, job_id)
+        await session.rollback()
+        await job_repo.update_status(job_id, "failed")
         await session.commit()
-        raise e
+        raise
 
 
 async def _run_schema_constrained_case_extraction_db(

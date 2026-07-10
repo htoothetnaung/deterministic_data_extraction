@@ -100,7 +100,6 @@ import type {
   ExtractionLabSchemaTemplate,
   ExtractionRunResponse,
   ExtractionSchemaField,
-  MultiDocumentMode,
   ParserInfo,
   ParserInputInfo,
   JobHistoryItem,
@@ -268,7 +267,6 @@ export function ExtractionLabView() {
   const schemaTemplates = schemaTemplatesQ.data ?? EMPTY_SCHEMA_TEMPLATES;
   const [selectedInputId, setSelectedInputId] = React.useState("");
   const [selectedInputIds, setSelectedInputIds] = React.useState<string[]>([]);
-  const [multiDocumentMode, setMultiDocumentMode] = React.useState<MultiDocumentMode>("per_document");
   const [parserId, setParserId] = React.useState("auto");
   const [schema, setSchema] = React.useState<ExtractionLabSchema>(() => cloneSchema(EMPTY_SCHEMA));
   const [schemaJson, setSchemaJson] = React.useState(() => JSON.stringify(EMPTY_SCHEMA, null, 2));
@@ -361,7 +359,6 @@ export function ExtractionLabView() {
       results.filter((item) => {
         if (!selectedInputId) return true;
         if (item.input.id === selectedInputId) return true;
-        if (selectedInputIds.length > 1 && item.input.id.startsWith("bundle:")) return true;
         return selectedInputIds.includes(item.input.id);
       }),
     [results, selectedInputId, selectedInputIds],
@@ -448,7 +445,7 @@ export function ExtractionLabView() {
         max_pages: maxPages,
         max_candidates_per_field: maxCandidates,
         preview_chars: 8000,
-        extraction_tier: "agentic",
+        extraction_tier: "agentic" as const,
         settings: {
           model: {
             model_tier: modelTier,
@@ -480,7 +477,6 @@ export function ExtractionLabView() {
         const response = await extractionLabApi.runMulti({
           ...basePayload,
           input_ids: inputIds,
-          multi_document_mode: multiDocumentMode,
         });
         return response.results;
       }
@@ -521,7 +517,6 @@ export function ExtractionLabView() {
         input_ids: inputIds,
         natural_language_query: naturalLanguageQuery.trim() || null,
         parser_id: parserId,
-        multi_document_mode: multiDocumentMode,
         chunking_strategy: chunkingStrategy,
         chunk_size: chunkSize,
         chunk_overlap: chunkOverlap,
@@ -806,13 +801,11 @@ export function ExtractionLabView() {
                 selectedInputId={selectedInputId}
                 selectedInputIds={selectedInputIds}
                 selectedInput={selectedInput}
-                multiDocumentMode={multiDocumentMode}
                 inputsLoading={inputsQ.isLoading}
                 onSelectInput={selectPrimaryInput}
                 onToggleInput={toggleInput}
                 onToggleAll={toggleAll}
                 onRemoveInput={removeInput}
-                onMultiDocumentModeChange={setMultiDocumentMode}
                 onUpload={() => fileInputRef.current?.click()}
                 page={boundedPage}
                 pageCount={pageCount}
@@ -1039,7 +1032,6 @@ export function ExtractionLabView() {
                   <SchemaBuilderTab
                     input={selectedInput}
                     selectedInputs={selectedInputs}
-                    multiDocumentMode={multiDocumentMode}
                     prompt={naturalLanguageQuery}
                     onPromptChange={setNaturalLanguageQuery}
                     onGenerate={() => generateSchemaM.mutate()}
@@ -1156,13 +1148,11 @@ function DocumentPanel({
   selectedInputId,
   selectedInputIds,
   selectedInput,
-  multiDocumentMode,
   inputsLoading,
   onSelectInput,
   onToggleInput,
   onToggleAll,
   onRemoveInput,
-  onMultiDocumentModeChange,
   onUpload,
   page,
   pageCount,
@@ -1172,13 +1162,11 @@ function DocumentPanel({
   selectedInputId: string;
   selectedInputIds: string[];
   selectedInput: ParserInputInfo | undefined;
-  multiDocumentMode: MultiDocumentMode;
   inputsLoading: boolean;
   onSelectInput: (inputId: string) => void;
   onToggleInput: (inputId: string, checked: boolean) => void;
   onToggleAll: (checked: boolean) => void;
   onRemoveInput: (inputId: string) => void;
-  onMultiDocumentModeChange: (mode: MultiDocumentMode) => void;
   onUpload: () => void;
   page: number;
   pageCount: number;
@@ -1247,26 +1235,6 @@ function DocumentPanel({
                 </div>
               ))}
             </div>
-            {selectedInputIds.length > 1 ? (
-              <div className="grid grid-cols-2 gap-1 rounded-lg border border-border bg-background p-1">
-                <Button
-                  type="button"
-                  size="sm"
-                  variant={multiDocumentMode === "per_document" ? "default" : "ghost"}
-                  onClick={() => onMultiDocumentModeChange("per_document")}
-                >
-                  Per document
-                </Button>
-                <Button
-                  type="button"
-                  size="sm"
-                  variant={multiDocumentMode === "cross_document" ? "default" : "ghost"}
-                  onClick={() => onMultiDocumentModeChange("cross_document")}
-                >
-                  Cross-page
-                </Button>
-              </div>
-            ) : null}
           </div>
         ) : null}
 
@@ -1799,7 +1767,6 @@ function FieldWithHelp({ label, children }: { label: string; children: React.Rea
 function SchemaAutoGeneratePanel({
   input,
   selectedInputs = [],
-  multiDocumentMode,
   prompt,
   onPromptChange,
   onGenerate,
@@ -1808,7 +1775,6 @@ function SchemaAutoGeneratePanel({
 }: {
   input: ParserInputInfo | undefined;
   selectedInputs: ParserInputInfo[];
-  multiDocumentMode: MultiDocumentMode;
   prompt: string;
   onPromptChange: (value: string) => void;
   onGenerate: () => void;
@@ -1843,11 +1809,6 @@ function SchemaAutoGeneratePanel({
                 <span className="text-xs font-medium uppercase text-muted-foreground">
                   {documents.length === 1 ? "Selected document" : `${documents.length} selected documents`}
                 </span>
-                {documents.length > 1 ? (
-                  <Badge tone={multiDocumentMode === "cross_document" ? "violet" : "slate"}>
-                    {multiDocumentMode === "cross_document" ? "Cross-page" : "Per document"}
-                  </Badge>
-                ) : null}
               </div>
               <div className="max-h-36 space-y-1 overflow-auto pr-1">
                 {documents.map((document) => (
@@ -2242,7 +2203,6 @@ function SchemaBuilder({
 function SchemaBuilderTab({
   input,
   selectedInputs,
-  multiDocumentMode,
   prompt,
   onPromptChange,
   onGenerate,
@@ -2259,7 +2219,6 @@ function SchemaBuilderTab({
 }: {
   input: ParserInputInfo | undefined;
   selectedInputs: ParserInputInfo[];
-  multiDocumentMode: MultiDocumentMode;
   prompt: string;
   onPromptChange: (value: string) => void;
   onGenerate: () => void;
@@ -2310,7 +2269,6 @@ function SchemaBuilderTab({
           <SchemaAutoGeneratePanel
             input={input}
             selectedInputs={selectedInputs}
-            multiDocumentMode={multiDocumentMode}
             prompt={prompt}
             onPromptChange={onPromptChange}
             onGenerate={onGenerate}

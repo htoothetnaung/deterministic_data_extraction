@@ -12,6 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 from sqlalchemy.orm import DeclarativeBase
 
 from app.core.config import settings
+from app.db.compat import ensure_runtime_settings_columns
 
 
 class Base(DeclarativeBase):
@@ -96,6 +97,7 @@ async def init_db() -> None:
     async with _engine.begin() as conn:
         await conn.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
         await conn.run_sync(Base.metadata.create_all)
+        await ensure_runtime_settings_columns(conn)
 
 
 async def dispose_db() -> None:

@@ -73,18 +73,12 @@ class ExtractionRunRequest(BaseModel):
     settings: Optional[dict[str, Any]] = None
 
 
-class MultiDocumentMode(str, Enum):
-    PER_DOCUMENT = "per_document"
-    CROSS_DOCUMENT = "cross_document"
-
-
 class MultiDocumentExtractionRunRequest(ExtractionRunRequest):
     input_ids: list[str] = Field(default_factory=list, min_length=1, max_length=100)
-    multi_document_mode: MultiDocumentMode = MultiDocumentMode.PER_DOCUMENT
 
 
 class MultiDocumentExtractionRunResponse(BaseModel):
-    mode: MultiDocumentMode
+    mode: str = "per_document"
     results: list["ExtractionRunResponse"]
 
 
@@ -92,7 +86,6 @@ class SchemaGenerationRequest(BaseModel):
     input_ids: list[str] = Field(default_factory=list, max_length=20)
     natural_language_query: Optional[str] = None
     parser_id: str = "auto"
-    multi_document_mode: MultiDocumentMode = MultiDocumentMode.PER_DOCUMENT
     chunking_strategy: str = "page"
     chunk_size: int = Field(default=500, ge=64, le=8000)
     chunk_overlap: int = Field(default=80, ge=0, le=2048)
