@@ -15,6 +15,7 @@ from app.core.config import runtime_env_value
 from app.extraction.evidence_pack import EvidencePack
 from app.extraction.field_extractor import ExtractedCandidate, FieldExtractor
 from app.extraction.prompts import SINGLE_FIELD_LLM_PROMPT
+from app.models.settings import RuntimeSettings
 
 GEMINI_FLASH_MODEL = "gemini-2.5-flash"
 OPENAI_EXTRACTION_MODEL = "gpt-5-mini"
@@ -77,22 +78,59 @@ class AgenticFieldExtractor:
         self.model_name = model_name
         self.adk_available = _adk_available()
 
-    def extract(self, field_path: str, field_schema: dict, pack: EvidencePack) -> list[ExtractedCandidate]:
-        logger.debug("agentic: openai_candidate field=%s", field_path)
-        candidate = _openai_candidate(field_path, field_schema, pack, OPENAI_EXTRACTION_MODEL)
-        if candidate:
-            logger.info("agentic: openai_candidate field=%s success=True", field_path)
-            return [candidate]
-        logger.debug("agentic: openai_candidate field=%s success=False, falling back to deterministic", field_path)
+    def extract(self, field_path: str, field_schema: dict, pack: EvidencePack, settings: RuntimeSettings | None = None) -> list[ExtractedCandidate]:
+        tier = settings.model.model_tier if (settings and settings.model) else "cost_effective"
+        
+        # Map tier to model name and provider
+        openai_model = None
+        gemini_model = None
+        primary_provider = "gemini"
+
+        if tier == "speed":
+            openai_model = "gpt-4o-mini"
+            primary_provider = "openai"
+        elif tier == "balanced":
+            openai_model = "gpt-4o"
+            primary_provider = "openai"
+        elif tier == "quality":
+            gemini_model = "gemini-2.5-pro"
+            primary_provider = "gemini"
+        else: # cost_effective
+            gemini_model = "gemini-2.5-flash"
+            primary_provider = "gemini"
+
+        if primary_provider == "openai":
+            logger.debug("agentic: openai_candidate field=%s model=%s", field_path, openai_model)
+            candidate = _openai_candidate(field_path, field_schema, pack, openai_model, settings)
+            if candidate:
+                logger.info("agentic: openai_candidate field=%s success=True", field_path)
+                return [candidate]
+        else:
+            logger.debug("agentic: gemini_candidate field=%s model=%s", field_path, gemini_model)
+            candidate = _gemini_candidate(field_path, field_schema, pack, gemini_model or self.model_name, settings)
+            if candidate:
+                logger.info("agentic: gemini_candidate field=%s success=True", field_path)
+                return [candidate]
+
+        # Rule extraction fallback
+        logger.debug("agentic: primary model field=%s failed, falling back to deterministic", field_path)
         candidates = self.rule_extractor.extract(field_path, field_schema, pack)
         if candidates:
             logger.info("agentic: deterministic field=%s candidates=%d", field_path, len(candidates))
             return candidates
-        logger.debug("agentic: deterministic field=%s empty, falling back to gemini", field_path)
-        candidate = _gemini_candidate(field_path, field_schema, pack, self.model_name)
+
+        # Final secondary model fallback
+        if primary_provider == "openai":
+            logger.debug("agentic: falling back to gemini field=%s", field_path)
+            candidate = _gemini_candidate(field_path, field_schema, pack, self.model_name, settings)
+        else:
+            logger.debug("agentic: falling back to openai field=%s", field_path)
+            candidate = _openai_candidate(field_path, field_schema, pack, OPENAI_EXTRACTION_MODEL, settings)
+        
         if candidate:
-            logger.info("agentic: gemini field=%s success=True", field_path)
+            logger.info("agentic: fallback field=%s success=True", field_path)
             return [candidate]
+            
         logger.warning("agentic: all_tiers_failed field=%s", field_path)
         return []
 
@@ -127,6 +165,7 @@ def _openai_candidate(
     field_schema: dict,
     pack: EvidencePack,
     model_name: str,
+    settings: RuntimeSettings | None = None,
 ) -> ExtractedCandidate | None:
     """Primary LLM extractor for the DB-backed pipeline.
 
@@ -160,18 +199,22 @@ def _openai_candidate(
         "evidence": evidence,
         "instructions": SINGLE_FIELD_LLM_PROMPT,
     }
-    body = json.dumps(
-        {
-            "model": model_name,
-            "input": [
-                {
-                    "role": "user",
-                    "content": [{"type": "input_text", "text": json.dumps(prompt, ensure_ascii=False)}],
-                }
-            ],
-            "text": {"format": {"type": "json_object"}},
-        }
-    ).encode("utf-8")
+    req_data = {
+        "model": model_name,
+        "input": [
+            {
+                "role": "user",
+                "content": [{"type": "input_text", "text": json.dumps(prompt, ensure_ascii=False)}],
+            }
+        ],
+        "text": {"format": {"type": "json_object"}},
+    }
+    if settings is not None and settings.model is not None:
+        req_data["temperature"] = settings.model.temperature
+        if settings.model.max_tokens:
+            req_data["max_completion_tokens"] = settings.model.max_tokens
+
+    body = json.dumps(req_data).encode("utf-8")
     request = urllib.request.Request(
         "https://api.openai.com/v1/responses",
         data=body,
@@ -218,6 +261,7 @@ def _gemini_candidate(
     field_schema: dict,
     pack: EvidencePack,
     model_name: str,
+    settings: RuntimeSettings | None = None,
 ) -> ExtractedCandidate | None:
     api_key = runtime_env_value("GOOGLE_API_KEY") or runtime_env_value("GEMINI_API_KEY")
     if not api_key:
@@ -247,9 +291,18 @@ def _gemini_candidate(
         "instructions": "Return strict JSON: {\"value\": any, \"confidence\": number, \"evidence_ids\": [string]}. Use null when unsupported.",
     }
     try:
+        from google.genai import types
+        config_kwargs = {}
+        if settings is not None and settings.model is not None:
+            config_kwargs["temperature"] = settings.model.temperature
+            if settings.model.max_tokens:
+                config_kwargs["max_output_tokens"] = settings.model.max_tokens
+        
+        config = types.GenerateContentConfig(**config_kwargs) if config_kwargs else None
         response = genai.Client(api_key=api_key).models.generate_content(
             model=model_name,
             contents=json.dumps(prompt, ensure_ascii=False),
+            config=config,
         )
         payload = _parse_json(getattr(response, "text", "") or "")
     except Exception as e:

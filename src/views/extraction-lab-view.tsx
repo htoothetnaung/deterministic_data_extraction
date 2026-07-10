@@ -1760,30 +1760,6 @@ function ExtractTierPanel({
                 </div>
               </div>
 
-              {/* COSTS AND LIMITS CARD */}
-              <div className="rounded-lg border border-border/70 bg-card p-4 space-y-4 shadow-sm">
-                <h4 className="text-base font-bold text-foreground">Cost limits</h4>
-                
-                <div className="grid grid-cols-2 gap-4">
-                  <div className="space-y-2">
-                    <Label className="text-sm font-semibold">Max page cost (credits)</Label>
-                    <Input
-                      type="number"
-                      value={maxPageCost}
-                      onChange={(e) => onMaxPageCostChange(parseInt(e.target.value) || 0)}
-                      className="h-10 text-sm"
-                    />
-                  </div>
-                  <div className="space-y-2">
-                    <Label className="text-sm font-semibold">Max job cost (credits)</Label>
-                    <Input
-                      type="number"
-                      value={maxJobCost}
-                      onChange={(e) => onMaxJobCostChange(parseInt(e.target.value) || 0)}
-                      className="h-10 text-sm"
-                    />
-                  </div>
-                </div>
               </div>
             </div>
           ) : null}
