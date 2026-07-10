@@ -288,7 +288,7 @@ def test_has_existing_parser_result_checks(monkeypatch: pytest.MonkeyPatch) -> N
         max_pages=2,
         max_candidates_per_field=2,
         preview_chars=1000,
-        extraction_tier="cost_effective"
+        extraction_tier="agentic"
     )
     assert not extraction_lab._has_existing_parser_result(req)
 

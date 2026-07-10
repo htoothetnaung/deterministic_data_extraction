@@ -69,8 +69,7 @@ class ExtractionRunRequest(BaseModel):
     chunk_overlap: int = Field(default=80, ge=0, le=2048)
     max_pages: int = Field(default=50, ge=1, le=500)
     max_candidates_per_field: int = Field(default=8, ge=1, le=25)
-    preview_chars: int = Field(default=6000, ge=1000, le=20000)
-    extraction_tier: ExtractionTier = ExtractionTier.COST_EFFECTIVE
+    extraction_tier: ExtractionTier = ExtractionTier.AGENTIC
     settings: Optional[dict[str, Any]] = None
 
 

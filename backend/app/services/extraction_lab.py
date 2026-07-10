@@ -475,7 +475,7 @@ async def run_extraction_db(session: AsyncSession, payload: ExtractionRunRequest
             max_evidence_per_field=payload.max_candidates_per_field,
             settings=payload.settings,
         ),
-        agentic=payload.extraction_tier != ExtractionTier.COST_EFFECTIVE,
+        agentic=True,
     )
     logger.info("extraction_lab: extraction complete status=%s", engine_result.status)
     fields, data, candidates_scanned = await _lab_fields_from_engine(session, payload.output_schema, engine_result)
@@ -542,7 +542,7 @@ async def run_extraction_db(session: AsyncSession, payload: ExtractionRunRequest
             candidate_conflicts=int(consistency.get("candidate_conflicts") or 0),
             critic_issues=int(consistency.get("critic_issue_count") or 0),
             consistency_score=float(consistency.get("consistency_score") or 1.0),
-            agentic_used=payload.extraction_tier != ExtractionTier.COST_EFFECTIVE,
+            agentic_used=True,
             adk_available=bool(consistency.get("adk_available")),
             model_used=consistency.get("model_used") if isinstance(consistency.get("model_used"), str) else None,
         ),
@@ -693,7 +693,7 @@ async def run_multi_document_extraction_db(
             max_evidence_per_field=payload.max_candidates_per_field,
             settings=payload.settings,
         ),
-        agentic=payload.extraction_tier != ExtractionTier.COST_EFFECTIVE,
+        agentic=True,
     )
     fields, data, candidates_scanned = await _lab_fields_from_engine(session, payload.output_schema, engine_result)
     model_name, dynamic_model, generated_code = _build_pydantic_model(payload.output_schema)
@@ -750,7 +750,7 @@ async def run_multi_document_extraction_db(
             candidate_conflicts=int(consistency.get("candidate_conflicts") or 0),
             critic_issues=int(consistency.get("critic_issue_count") or 0),
             consistency_score=float(consistency.get("consistency_score") or 1.0),
-            agentic_used=payload.extraction_tier != ExtractionTier.COST_EFFECTIVE,
+            agentic_used=True,
             adk_available=bool(consistency.get("adk_available")),
             model_used=consistency.get("model_used") if isinstance(consistency.get("model_used"), str) else None,
         ),

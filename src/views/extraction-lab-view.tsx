@@ -279,7 +279,6 @@ export function ExtractionLabView() {
   const [chunkingStrategy, setChunkingStrategy] = React.useState<ChunkingStrategy>("table_row");
   const [chunkSize, setChunkSize] = React.useState(500);
   const [chunkOverlap, setChunkOverlap] = React.useState(80);
-  const [extractTier, setExtractTier] = React.useState<ExtractTier>("cost_effective");
   const [advancedOpen, setAdvancedOpen] = React.useState(false);
   
   // Model Settings
@@ -449,7 +448,7 @@ export function ExtractionLabView() {
         max_pages: maxPages,
         max_candidates_per_field: maxCandidates,
         preview_chars: 8000,
-        extraction_tier: extractTier,
+        extraction_tier: "agentic",
         settings: {
           model: {
             model_tier: modelTier,
@@ -904,9 +903,7 @@ export function ExtractionLabView() {
 
           <TabsContent value="build" className="mt-0 space-y-4">
             <ExtractTierPanel
-              tier={extractTier}
               advancedOpen={advancedOpen}
-              onTierChange={setExtractTier}
               onAdvancedOpenChange={setAdvancedOpen}
               
               // Model Settings
@@ -1424,9 +1421,7 @@ function TextPreview({ input }: { input: ParserInputInfo }) {
 }
 
 function ExtractTierPanel({
-  tier,
   advancedOpen,
-  onTierChange,
   onAdvancedOpenChange,
   
   // Model Settings
@@ -1479,9 +1474,7 @@ function ExtractTierPanel({
   onWebhookEventsChange,
   onWebhookPayloadFormatChange,
 }: {
-  tier: ExtractTier;
   advancedOpen: boolean;
-  onTierChange: (tier: ExtractTier) => void;
   onAdvancedOpenChange: (open: boolean) => void;
 
   // Model Settings
@@ -1534,55 +1527,9 @@ function ExtractTierPanel({
   onWebhookEventsChange: (value: string) => void;
   onWebhookPayloadFormatChange: (value: string) => void;
 }) {
-  const tierCopy: Record<ExtractTier, { title: string; credits: string; description: string; badge: string }> = {
-    cost_effective: {
-      title: "Cost Effective",
-      credits: "",
-      description: "",
-      badge: "",
-    },
-    agentic: {
-      title: "Agentic",
-      credits: "",
-      description: "Agentic extraction for complex evidence, tables, and schema reasoning",
-      badge: "",
-    },
-  };
-  const selected = tierCopy[tier];
-
   return (
-    <SectionCard title="Extract Tier" description="Cost effective uses local hybrid retrieval; agentic adds bounded Gemini/ADK consistency checks.">
+    <SectionCard title="Extraction Settings" description="Agentic extraction for complex evidence, tables, and schema reasoning.">
       <div className="space-y-5">
-        <div className="grid gap-3 md:grid-cols-2">
-          {(Object.keys(tierCopy) as ExtractTier[]).map((item) => {
-            const isSelected = tier === item;
-            return (
-              <button
-                key={item}
-                type="button"
-                onClick={() => onTierChange(item)}
-                className={cn(
-                  "min-h-20 rounded-lg border px-4 py-3 text-center transition",
-                  isSelected
-                    ? "border-primary bg-primary/10 text-foreground ring-1 ring-primary/40"
-                    : "border-transparent bg-muted/20 hover:border-border",
-                )}
-              >
-                <p className="text-xs font-semibold uppercase tracking-[0.18em] text-muted-foreground">
-                  {tierCopy[item].title}
-                </p>
-                {tierCopy[item].credits ? (
-                  <p className="mt-1 text-2xl font-semibold tracking-tight">{tierCopy[item].credits}</p>
-                ) : null}
-              </button>
-            );
-          })}
-        </div>
-
-        <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-border bg-muted/10 px-4 py-3">
-          <p className="min-w-0 text-base text-muted-foreground">{selected.description}</p>
-          <Badge tone="violet">{selected.badge}</Badge>
-        </div>
 
         <div className="border-t border-border/70 pt-3">
           <button
