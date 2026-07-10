@@ -34,7 +34,7 @@ class _FakeJobRepo:
 class _FakeRetriever:
     retrieval_stats = SimpleNamespace(mode="test", dense_hits=0, sparse_hits=0)
 
-    async def retrieve(self, case_id: str, plan, attempt: int):
+    async def retrieve(self, case_id: str, plan, attempt: int, *args, **kwargs):
         return EvidencePack(
             field_path="issuer",
             query="issuer",
@@ -44,7 +44,7 @@ class _FakeRetriever:
 
 
 class _FakePlanner:
-    def plan(self, field_path: str, field_schema: dict):
+    def plan(self, field_path: str, field_schema: dict, *args, **kwargs):
         return SimpleNamespace(field_path=field_path)
 
 

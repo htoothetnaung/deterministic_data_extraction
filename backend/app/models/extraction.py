@@ -132,6 +132,7 @@ class ExtractionRequest(BaseModel):
     output_schema: dict[str, Any] | None = Field(default=None, alias="schema_json")
     max_evidence_per_field: int = Field(default=8, ge=1, le=25)
     baseline: bool = False
+    settings: dict[str, Any] | None = Field(default=None)
 
 
 class SearchRequest(BaseModel):

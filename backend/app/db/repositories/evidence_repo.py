@@ -16,24 +16,29 @@ logger = logging.getLogger(__name__)
 HYBRID_SEARCH_SQL = text(
     """
     WITH fts AS (
-        SELECT evidence_id, ts_rank(tsv_search, plainto_tsquery('english', :query)) AS score
+        SELECT 
+            evidence_id, 
+            ROW_NUMBER() OVER(ORDER BY ts_rank(tsv_search, plainto_tsquery('english', :query)) DESC) AS rank
         FROM evidence_items
         WHERE tsv_search @@ plainto_tsquery('english', :query)
           AND case_id = :case_id
           AND (CAST(:source_type_filter AS text) IS NULL OR source_type = CAST(:source_type_filter AS text))
+        LIMIT :sparse_limit
     ),
     vector_scores AS (
-            SELECT emb.evidence_id, 1 - (emb.embedding <=> CAST(:query_embedding AS vector)) AS score
+        SELECT 
+            emb.evidence_id,
+            ROW_NUMBER() OVER(ORDER BY emb.embedding <=> CAST(:query_embedding AS vector) ASC) AS rank
         FROM evidence_embeddings emb
         JOIN evidence_items e2 ON e2.evidence_id = emb.evidence_id
         WHERE e2.case_id = :case_id
           AND (CAST(:source_type_filter AS text) IS NULL OR e2.source_type = CAST(:source_type_filter AS text))
         ORDER BY emb.embedding <=> CAST(:query_embedding AS vector)
-        LIMIT :vec_limit
+        LIMIT :dense_limit
     )
     SELECT
         COALESCE(fts.evidence_id, v.evidence_id) AS evidence_id,
-        COALESCE(fts.score, 0.0) * :fts_weight + COALESCE(v.score, 0.0) * :vec_weight AS hybrid_score,
+        COALESCE(1.0 / (:rrf_k + fts.rank), 0.0) + COALESCE(1.0 / (:rrf_k + v.rank), 0.0) AS hybrid_score,
         e.source_type,
         e.text,
         e.markdown,
@@ -254,12 +259,14 @@ class EvidenceRepository(BaseRepository[EvidenceItemModel]):
         vec_weight: float = 0.6,
         vec_limit: int = 50,
         source_type_filter: str | None = None,
+        dense_limit: int = 10,
+        sparse_limit: int = 10,
+        rrf_k: int = 60,
     ) -> list[dict[str, Any]]:
         """Perform a hybrid search over evidence items, falling back to simpler searches if needed.
 
         The retrieval workflow is:
-        1. If a vector embedding is provided, run a weighted hybrid search. It calculates
-           `0.4 * FTS_Score + 0.6 * Cosine_Similarity_Score` using the HNSW index on pgvector.
+        1. If a vector embedding is provided, run a Reciprocal Rank Fusion (RRF) search.
         2. If no vector embedding is provided, fall back to pure database FTS using `plainto_tsquery`.
         3. If hybrid/FTS returns empty results, run `keyword_search` (ILIKE substring query + FTS fallback)
            to ensure no document context is missed due to tokenization or out-of-vocabulary terms.
@@ -274,9 +281,9 @@ class EvidenceRepository(BaseRepository[EvidenceItemModel]):
                 "query_embedding": vec_literal,
                 "case_id": case_id,
                 "top_k": top_k,
-                "fts_weight": fts_weight,
-                "vec_weight": vec_weight,
-                "vec_limit": vec_limit,
+                "dense_limit": dense_limit if dense_limit is not None else vec_limit,
+                "sparse_limit": sparse_limit,
+                "rrf_k": rrf_k,
                 "source_type_filter": source_type_filter,
             }
             result = await self.session.execute(HYBRID_SEARCH_SQL, params)

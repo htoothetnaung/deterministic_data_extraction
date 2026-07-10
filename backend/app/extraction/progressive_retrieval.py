@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
 
 from app.db.repositories.evidence_repo import EvidenceRepository
 from app.extraction.evidence_pack import EvidencePack, build_evidence_pack
@@ -15,6 +16,9 @@ from app.extraction.planner import FieldRetrievalPlan
 from app.services.embedding import embed_text
 import logging
 logger = logging.getLogger(__name__)
+
+if TYPE_CHECKING:
+    from app.models.settings import RuntimeSettings
 
 
 _WEIGHTED_FTS_VECTOR = "weighted_fts_vector"
@@ -63,7 +67,13 @@ class ProgressiveRetriever:
         self.use_api_embeddings = use_api_embeddings
         self.retrieval_stats = RetrievalStats()
 
-    async def retrieve(self, case_id: str, plan: FieldRetrievalPlan, attempt: int = 1) -> EvidencePack:
+    async def retrieve(
+        self,
+        case_id: str,
+        plan: FieldRetrievalPlan,
+        attempt: int = 1,
+        settings: RuntimeSettings | None = None,
+    ) -> EvidencePack:
         """Retrieve evidence chunks for a specific field, dynamically widening parameters on subsequent attempts.
 
         Widenings:
@@ -73,6 +83,12 @@ class ProgressiveRetriever:
         * **Embedding Failure**: Gracefully falls back to text-only sparse indexing if OpenAI is slow/failed.
         """
         top_k = 3 if attempt == 1 else 8 if attempt == 2 else plan.budget.max_evidence_items
+        if settings is not None:
+            # Expand retrieval chunks dynamically on retry attempts
+            top_k += settings.retrieval.retry_chunk_expansion * (attempt - 1)
+            # Cap top_k by the maximum chunk limit setting
+            top_k = min(top_k, settings.retrieval.max_chunk_limit)
+
         source_filter = plan.preferred_source_types[0] if attempt == 1 and plan.preferred_source_types else None
         query_embedding: list[float] | None = None
         mode = _FTS_ONLY
@@ -84,12 +100,20 @@ class ProgressiveRetriever:
             logger.warning("progressive_retrieval: embed_text field=%s attempt=%d failed=%s", plan.field_path, attempt, e)
             pass
             
+        # Resolve retrieval candidates limits
+        dense_limit = settings.retrieval.dense_candidate_limit if settings is not None else 10
+        sparse_limit = settings.retrieval.sparse_candidate_limit if settings is not None else 10
+        rrf_k = settings.retrieval.rank_fusion_constant if settings is not None else 60
+
         rows = await self.evidence_repo.hybrid_search(
             case_id=case_id,
             query=plan.query,
             query_embedding=query_embedding,
             top_k=top_k,
             source_type_filter=source_filter,
+            dense_limit=dense_limit,
+            sparse_limit=sparse_limit,
+            rrf_k=rrf_k,
         )
         logger.debug("progressive_retrieval: search field=%s attempt=%d top_k=%d rows=%d query=%s", plan.field_path, attempt, top_k, len(rows), plan.query[:80])
         if not rows and source_filter:
@@ -98,6 +122,9 @@ class ProgressiveRetriever:
                 query=plan.query,
                 query_embedding=query_embedding,
                 top_k=top_k,
+                dense_limit=dense_limit,
+                sparse_limit=sparse_limit,
+                rrf_k=rrf_k,
             )
             logger.debug("progressive_retrieval: fallback_no_filter field=%s attempt=%d rows=%d", plan.field_path, attempt, len(rows))
         

@@ -109,3 +109,29 @@ def test_hybrid_search_applies_source_type_filter() -> None:
 
     assert rows
     assert rows[0]["source_type"] == "table_row"
+
+
+def test_hybrid_search_accepts_custom_rrf_parameters() -> None:
+    hybrid_rows = [
+        {"evidence_id": "e1", "hybrid_score": 0.95, "source_type": "text_block", "text": "value", "markdown": None},
+    ]
+    session = _mock_session(hybrid_rows=hybrid_rows)
+    repo = evidence_repo.EvidenceRepository(session)
+
+    rows = asyncio.run(repo.hybrid_search(
+        case_id="c1",
+        query="data",
+        query_embedding=[0.1] * 3,
+        top_k=5,
+        dense_limit=15,
+        sparse_limit=25,
+        rrf_k=50,
+    ))
+
+    assert len(rows) == 1
+    session.execute.assert_called_once()
+    called_args = session.execute.call_args[0]
+    params = called_args[1]
+    assert params["dense_limit"] == 15
+    assert params["sparse_limit"] == 25
+    assert params["rrf_k"] == 50

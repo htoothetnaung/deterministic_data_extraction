@@ -39,7 +39,6 @@ from app.models.document import DocumentMetadata, DocumentSource, DocumentStatus
 from app.models.extraction import (
     CaseCreate,
     EvidenceSource,
-    ExtractionCase,
     ExtractionRequest,
     ExtractionResult,
     FieldCandidate,
@@ -47,6 +46,7 @@ from app.models.extraction import (
     SearchHit,
     SearchRequest,
 )
+from app.models.settings import RuntimeSettings
 from app.services.artifact_store import ArtifactStore
 from app.services.embedding import embed_text
 
@@ -226,8 +226,18 @@ async def run_case_extraction_db(
     if schema is None:
         schema = {"type": "object", "properties": {}}
 
+    case = await CaseRepository(session).get(case_id)
+    case_settings_dict = getattr(case, "settings", None) or {}
+    request_settings = payload.settings or {}
+    resolved_settings_dict = {**case_settings_dict, **request_settings}
+    try:
+        settings_obj = RuntimeSettings.model_validate(resolved_settings_dict)
+    except Exception:
+        settings_obj = RuntimeSettings()
+
     job_repo = ExtractionJobRepository(session)
     job = await job_repo.create_job(case_id=case_id, schema_id=payload.schema_id, schema_json=schema)
+    job.settings = settings_obj.model_dump()
     job.status = "running"
     await session.commit()
 
@@ -244,6 +254,7 @@ async def run_case_extraction_db(
                 job_repo=job_repo,
                 planner=planner,
                 retriever=retriever,
+                settings=settings_obj,
             )
 
         extractor = _extractor_for_mode(agentic)
@@ -255,7 +266,7 @@ async def run_case_extraction_db(
         logger.info("production_extraction: start case=%s fields=%d agentic=%s", case_id, len(properties), agentic)
         for field_path, field_schema in properties.items():
             logger.debug("production_extraction: extract_field field=%s schema_type=%s", field_path, str(field_schema.get("type") or "string"))
-            plan = planner.plan(field_path, field_schema)
+            plan = planner.plan(field_path, field_schema, settings=settings_obj)
             field_row = await job_repo.add_field_result(job.job_id, field_path)
             candidates = []
             final_status = "missing"
@@ -263,8 +274,9 @@ async def run_case_extraction_db(
             final_confidence = 0.0
             validation_errors: list[str] = []
             was_missing = False
-            for attempt_number in [1, 2, 3]:
-                pack = await retriever.retrieve(case_id, plan, attempt=attempt_number)
+            max_retries = settings_obj.queries.empty_results_max_retry
+            for attempt_number in range(1, max_retries + 1):
+                pack = await retriever.retrieve(case_id, plan, attempt=attempt_number, settings=settings_obj)
                 logger.debug("production_extraction: retrieve field=%s attempt=%d pack_size=%d", field_path, attempt_number, pack.estimated_text_tokens if hasattr(pack, 'estimated_text_tokens') else 0)
                 await job_repo.add_attempt(
                     field_row.field_result_id,
@@ -278,7 +290,7 @@ async def run_case_extraction_db(
                     logger.debug("production_extraction: no_candidates field=%s attempt=%d", field_path, attempt_number)
                     was_missing = True
                     consistency.null_fields_detected += 1 if attempt_number == 1 else 0
-                    consistency.null_retries += 1 if agentic and attempt_number < 3 else 0
+                    consistency.null_retries += 1 if agentic and attempt_number < max_retries else 0
                     continue
                 if was_missing:
                     consistency.recovered_nulls += 1
@@ -306,7 +318,7 @@ async def run_case_extraction_db(
             field_row.status = final_status
             field_row.confidence = final_confidence
             field_row.validation_errors = validation_errors
-            field_row.attempt_count = 3
+            field_row.attempt_count = max_retries
             cleaned_final = sanitize_extracted_value(final_value, field_path, str(field_schema.get("type") or "string"))
             fields[field_path] = FieldResult(
                 field_path=field_path,
@@ -379,6 +391,7 @@ async def _run_schema_constrained_case_extraction_db(
     job_repo: ExtractionJobRepository,
     planner: FieldRetrievalPlanner,
     retriever: ProgressiveRetriever,
+    settings: RuntimeSettings | None = None,
 ) -> ExtractionResult:
     """Execute schema-constrained extraction using LLM structured generation modes.
 
@@ -386,6 +399,8 @@ async def _run_schema_constrained_case_extraction_db(
     with mapped table structures and critical front-matter page evidence. Runs targeted
     retry extraction routines for missing, low-confidence, or validation-failing outputs.
     """
+    if settings is None:
+        settings = RuntimeSettings()
     properties = schema.get("properties", {}) if isinstance(schema.get("properties"), dict) else {}
     required = set(schema.get("required", []) if isinstance(schema.get("required"), list) else [])
     logger.info("production_extraction: schema_mode start case=%s fields=%d", case_id, len(properties))
@@ -395,9 +410,9 @@ async def _run_schema_constrained_case_extraction_db(
     field_packs = {}
 
     for field_path, field_schema in properties.items():
-        plan = planner.plan(field_path, field_schema)
+        plan = planner.plan(field_path, field_schema, settings=settings)
         field_row = await job_repo.add_field_result(job.job_id, field_path)
-        pack = await retriever.retrieve(case_id, plan, attempt=3)
+        pack = await retriever.retrieve(case_id, plan, attempt=3, settings=settings)
         await job_repo.add_attempt(
             field_row.field_result_id,
             1,
@@ -671,7 +686,11 @@ async def retry_field_db(session: AsyncSession, job_id: str, field_path: str) ->
     job = await ExtractionJobRepository(session).get(job_id)
     if job is None:
         raise HTTPException(status_code=404, detail="Extraction job not found")
-    payload = ExtractionRequest(schema_id=job.schema_id, output_schema=job.schema_json or {"type": "object", "properties": {field_path: {"type": "string"}}})
+    payload = ExtractionRequest(
+        schema_id=job.schema_id,
+        output_schema=job.schema_json or {"type": "object", "properties": {field_path: {"type": "string"}}},
+        settings=job.settings,
+    )
     return await run_case_extraction_db(session, job.case_id, payload)
 
 

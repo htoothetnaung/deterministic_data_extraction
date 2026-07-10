@@ -7,8 +7,12 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
 
 from app.extraction.context_budget import ContextBudget, budget_for_field
+
+if TYPE_CHECKING:
+    from app.models.settings import RuntimeSettings
 
 
 @dataclass(frozen=True)
@@ -26,7 +30,13 @@ class FieldRetrievalPlan:
 class FieldRetrievalPlanner:
     """Generates extraction search plans using schema structures and field hints."""
 
-    def plan(self, field_path: str, field_schema: dict, hints: dict | None = None) -> FieldRetrievalPlan:
+    def plan(
+        self,
+        field_path: str,
+        field_schema: dict,
+        hints: dict | None = None,
+        settings: RuntimeSettings | None = None,
+    ) -> FieldRetrievalPlan:
         """Construct a query plan for a single field path.
 
         Automatically routes financial/numerical metrics to prefer table structures
@@ -48,7 +58,7 @@ class FieldRetrievalPlanner:
             keywords=keywords,
             preferred_source_types=preferred,
             metadata_filters=dict(hints.get("metadata_filters") or {}),
-            budget=budget_for_field(field_schema),
+            budget=budget_for_field(field_schema, settings),
         )
 
 

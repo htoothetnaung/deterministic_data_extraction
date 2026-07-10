@@ -45,6 +45,7 @@ class CaseModel(Base):
     title = mapped_column(String(500), nullable=False)
     status = mapped_column(String(30), nullable=False, default="open")
     metadata_json = mapped_column(JSONB, nullable=False, default=dict)
+    settings = mapped_column(JSONB, nullable=True)
 
     created_at = mapped_column(DateTime(timezone=True), default=_utcnow, nullable=False)
     updated_at = mapped_column(DateTime(timezone=True), default=_utcnow, onupdate=_utcnow, nullable=False)
@@ -239,6 +240,7 @@ class ExtractionJobModel(Base):
     case_id = mapped_column(String(50), ForeignKey("cases.case_id", ondelete="CASCADE"), nullable=False, index=True)
     schema_id = mapped_column(String(50), nullable=False)
     schema_json = mapped_column(JSONB, nullable=True)
+    settings = mapped_column(JSONB, nullable=True)
     
     # Status states: 'pending', 'running', 'completed', 'needs_review', 'failed'
     status = mapped_column(String(30), nullable=False, default="pending")
