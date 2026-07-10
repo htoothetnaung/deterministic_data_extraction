@@ -1759,8 +1759,6 @@ function ExtractTierPanel({
                   />
                 </div>
               </div>
-
-              </div>
             </div>
           ) : null}
         </div>
