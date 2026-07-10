@@ -71,6 +71,7 @@ class ExtractionRunRequest(BaseModel):
     max_candidates_per_field: int = Field(default=8, ge=1, le=25)
     preview_chars: int = Field(default=6000, ge=1000, le=20000)
     extraction_tier: ExtractionTier = ExtractionTier.COST_EFFECTIVE
+    settings: Optional[dict[str, Any]] = None
 
 
 class MultiDocumentMode(str, Enum):

@@ -473,6 +473,7 @@ async def run_extraction_db(session: AsyncSession, payload: ExtractionRunRequest
             schema_id=payload.output_schema.name or "extraction_lab",
             output_schema=_lab_schema_to_json_schema(search_schema),
             max_evidence_per_field=payload.max_candidates_per_field,
+            settings=payload.settings,
         ),
         agentic=payload.extraction_tier != ExtractionTier.COST_EFFECTIVE,
     )
@@ -690,6 +691,7 @@ async def run_multi_document_extraction_db(
             schema_id=payload.output_schema.name or "extraction_lab_bundle",
             output_schema=_lab_schema_to_json_schema(search_schema),
             max_evidence_per_field=payload.max_candidates_per_field,
+            settings=payload.settings,
         ),
         agentic=payload.extraction_tier != ExtractionTier.COST_EFFECTIVE,
     )

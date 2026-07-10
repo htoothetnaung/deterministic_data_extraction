@@ -281,12 +281,30 @@ export function ExtractionLabView() {
   const [chunkOverlap, setChunkOverlap] = React.useState(80);
   const [extractTier, setExtractTier] = React.useState<ExtractTier>("cost_effective");
   const [advancedOpen, setAdvancedOpen] = React.useState(false);
-  const [targetMode, setTargetMode] = React.useState("per_document");
-  const [parseTier, setParseTier] = React.useState("agentic");
-  const [citeSources, setCiteSources] = React.useState(true);
-  const [confidenceScores, setConfidenceScores] = React.useState(true);
-  const [systemPromptEnabled, setSystemPromptEnabled] = React.useState(false);
-  const [systemPrompt, setSystemPrompt] = React.useState("");
+  
+  // Model Settings
+  const [modelTier, setModelTier] = React.useState("cost_effective");
+  const [temperature, setTemperature] = React.useState(0.0);
+  const [maxTokens, setMaxTokens] = React.useState(2048);
+
+  // Retrieval Settings
+  const [denseCandidateLimit, setDenseCandidateLimit] = React.useState(10);
+  const [sparseCandidateLimit, setSparseCandidateLimit] = React.useState(10);
+  const [rankFusionConstant, setRankFusionConstant] = React.useState(60);
+  const [scalarChunkLimit, setScalarChunkLimit] = React.useState(5);
+  const [narrativeChunkLimit, setNarrativeChunkLimit] = React.useState(15);
+  const [maxChunkLimit, setMaxChunkLimit] = React.useState(30);
+  const [retryChunkExpansion, setRetryChunkExpansion] = React.useState(5);
+
+  // Queries Settings
+  const [emptyResultsMaxRetry, setEmptyResultsMaxRetry] = React.useState(3);
+  const [queryMinWords, setQueryMinWords] = React.useState(3);
+  const [queryMaxWords, setQueryMaxWords] = React.useState(10);
+  const [priorResultPreview, setPriorResultPreview] = React.useState(true);
+
+  // Cost Settings
+  const [maxPageCost, setMaxPageCost] = React.useState(10);
+  const [maxJobCost, setMaxJobCost] = React.useState(100);
   const [webhooksOpen, setWebhooksOpen] = React.useState(false);
   const [webhookUrl, setWebhookUrl] = React.useState("");
   const [webhookEvents, setWebhookEvents] = React.useState("all");
@@ -432,6 +450,32 @@ export function ExtractionLabView() {
         max_candidates_per_field: maxCandidates,
         preview_chars: 8000,
         extraction_tier: extractTier,
+        settings: {
+          model: {
+            model_tier: modelTier,
+            temperature: Number(temperature),
+            max_tokens: Number(maxTokens),
+          },
+          retrieval: {
+            dense_candidate_limit: Number(denseCandidateLimit),
+            sparse_candidate_limit: Number(sparseCandidateLimit),
+            rank_fusion_constant: Number(rankFusionConstant),
+            scalar_chunk_limit: Number(scalarChunkLimit),
+            narrative_chunk_limit: Number(narrativeChunkLimit),
+            max_chunk_limit: Number(maxChunkLimit),
+            retry_chunk_expansion: Number(retryChunkExpansion),
+          },
+          queries: {
+            empty_results_max_retry: Number(emptyResultsMaxRetry),
+            query_min_words: Number(queryMinWords),
+            query_max_words: Number(queryMaxWords),
+            prior_result_preview: Boolean(priorResultPreview),
+          },
+          costs: {
+            max_page_cost: Number(maxPageCost),
+            max_job_cost: Number(maxJobCost),
+          },
+        },
       };
       if (inputIds.length > 1) {
         const response = await extractionLabApi.runMulti({
@@ -862,24 +906,54 @@ export function ExtractionLabView() {
             <ExtractTierPanel
               tier={extractTier}
               advancedOpen={advancedOpen}
-              targetMode={targetMode}
-              parseTier={parseTier}
-              citeSources={citeSources}
-              confidenceScores={confidenceScores}
-              systemPromptEnabled={systemPromptEnabled}
-              systemPrompt={systemPrompt}
+              onTierChange={setExtractTier}
+              onAdvancedOpenChange={setAdvancedOpen}
+              
+              // Model Settings
+              modelTier={modelTier}
+              onModelTierChange={setModelTier}
+              temperature={temperature}
+              onTemperatureChange={setTemperature}
+              maxTokens={maxTokens}
+              onMaxTokensChange={setMaxTokens}
+
+              // Retrieval Settings
+              denseCandidateLimit={denseCandidateLimit}
+              onDenseCandidateLimitChange={setDenseCandidateLimit}
+              sparseCandidateLimit={sparseCandidateLimit}
+              onSparseCandidateLimitChange={setSparseCandidateLimit}
+              rankFusionConstant={rankFusionConstant}
+              onRankFusionConstantChange={setRankFusionConstant}
+              scalarChunkLimit={scalarChunkLimit}
+              onScalarChunkLimitChange={setScalarChunkLimit}
+              narrativeChunkLimit={narrativeChunkLimit}
+              onNarrativeChunkLimitChange={setNarrativeChunkLimit}
+              maxChunkLimit={maxChunkLimit}
+              onMaxChunkLimitChange={setMaxChunkLimit}
+              retryChunkExpansion={retryChunkExpansion}
+              onRetryChunkExpansionChange={setRetryChunkExpansion}
+
+              // Queries Settings
+              emptyResultsMaxRetry={emptyResultsMaxRetry}
+              onEmptyResultsMaxRetryChange={setEmptyResultsMaxRetry}
+              queryMinWords={queryMinWords}
+              onQueryMinWordsChange={setQueryMinWords}
+              queryMaxWords={queryMaxWords}
+              onQueryMaxWordsChange={setQueryMaxWords}
+              priorResultPreview={priorResultPreview}
+              onPriorResultPreviewChange={setPriorResultPreview}
+
+              // Cost Settings
+              maxPageCost={maxPageCost}
+              onMaxPageCostChange={setMaxPageCost}
+              maxJobCost={maxJobCost}
+              onMaxJobCostChange={setMaxJobCost}
+
+              // Webhooks
               webhooksOpen={webhooksOpen}
               webhookUrl={webhookUrl}
               webhookEvents={webhookEvents}
               webhookPayloadFormat={webhookPayloadFormat}
-              onTierChange={setExtractTier}
-              onAdvancedOpenChange={setAdvancedOpen}
-              onTargetModeChange={setTargetMode}
-              onParseTierChange={setParseTier}
-              onCiteSourcesChange={setCiteSources}
-              onConfidenceScoresChange={setConfidenceScores}
-              onSystemPromptEnabledChange={setSystemPromptEnabled}
-              onSystemPromptChange={setSystemPrompt}
               onWebhooksOpenChange={setWebhooksOpen}
               onWebhookUrlChange={setWebhookUrl}
               onWebhookEventsChange={setWebhookEvents}
@@ -1352,24 +1426,54 @@ function TextPreview({ input }: { input: ParserInputInfo }) {
 function ExtractTierPanel({
   tier,
   advancedOpen,
-  targetMode,
-  parseTier,
-  citeSources,
-  confidenceScores,
-  systemPromptEnabled,
-  systemPrompt,
+  onTierChange,
+  onAdvancedOpenChange,
+  
+  // Model Settings
+  modelTier,
+  onModelTierChange,
+  temperature,
+  onTemperatureChange,
+  maxTokens,
+  onMaxTokensChange,
+
+  // Retrieval Settings
+  denseCandidateLimit,
+  onDenseCandidateLimitChange,
+  sparseCandidateLimit,
+  onSparseCandidateLimitChange,
+  rankFusionConstant,
+  onRankFusionConstantChange,
+  scalarChunkLimit,
+  onScalarChunkLimitChange,
+  narrativeChunkLimit,
+  onNarrativeChunkLimitChange,
+  maxChunkLimit,
+  onMaxChunkLimitChange,
+  retryChunkExpansion,
+  onRetryChunkExpansionChange,
+
+  // Queries Settings
+  emptyResultsMaxRetry,
+  onEmptyResultsMaxRetryChange,
+  queryMinWords,
+  onQueryMinWordsChange,
+  queryMaxWords,
+  onQueryMaxWordsChange,
+  priorResultPreview,
+  onPriorResultPreviewChange,
+
+  // Cost Settings
+  maxPageCost,
+  onMaxPageCostChange,
+  maxJobCost,
+  onMaxJobCostChange,
+
+  // Webhooks
   webhooksOpen,
   webhookUrl,
   webhookEvents,
   webhookPayloadFormat,
-  onTierChange,
-  onAdvancedOpenChange,
-  onTargetModeChange,
-  onParseTierChange,
-  onCiteSourcesChange,
-  onConfidenceScoresChange,
-  onSystemPromptEnabledChange,
-  onSystemPromptChange,
   onWebhooksOpenChange,
   onWebhookUrlChange,
   onWebhookEventsChange,
@@ -1377,24 +1481,54 @@ function ExtractTierPanel({
 }: {
   tier: ExtractTier;
   advancedOpen: boolean;
-  targetMode: string;
-  parseTier: string;
-  citeSources: boolean;
-  confidenceScores: boolean;
-  systemPromptEnabled: boolean;
-  systemPrompt: string;
+  onTierChange: (tier: ExtractTier) => void;
+  onAdvancedOpenChange: (open: boolean) => void;
+
+  // Model Settings
+  modelTier: string;
+  onModelTierChange: (value: string) => void;
+  temperature: number;
+  onTemperatureChange: (value: number) => void;
+  maxTokens: number;
+  onMaxTokensChange: (value: number) => void;
+
+  // Retrieval Settings
+  denseCandidateLimit: number;
+  onDenseCandidateLimitChange: (value: number) => void;
+  sparseCandidateLimit: number;
+  onSparseCandidateLimitChange: (value: number) => void;
+  rankFusionConstant: number;
+  onRankFusionConstantChange: (value: number) => void;
+  scalarChunkLimit: number;
+  onScalarChunkLimitChange: (value: number) => void;
+  narrativeChunkLimit: number;
+  onNarrativeChunkLimitChange: (value: number) => void;
+  maxChunkLimit: number;
+  onMaxChunkLimitChange: (value: number) => void;
+  retryChunkExpansion: number;
+  onRetryChunkExpansionChange: (value: number) => void;
+
+  // Queries Settings
+  emptyResultsMaxRetry: number;
+  onEmptyResultsMaxRetryChange: (value: number) => void;
+  queryMinWords: number;
+  onQueryMinWordsChange: (value: number) => void;
+  queryMaxWords: number;
+  onQueryMaxWordsChange: (value: number) => void;
+  priorResultPreview: boolean;
+  onPriorResultPreviewChange: (value: boolean) => void;
+
+  // Cost Settings
+  maxPageCost: number;
+  onMaxPageCostChange: (value: number) => void;
+  maxJobCost: number;
+  onMaxJobCostChange: (value: number) => void;
+
+  // Webhooks
   webhooksOpen: boolean;
   webhookUrl: string;
   webhookEvents: string;
   webhookPayloadFormat: string;
-  onTierChange: (tier: ExtractTier) => void;
-  onAdvancedOpenChange: (open: boolean) => void;
-  onTargetModeChange: (value: string) => void;
-  onParseTierChange: (value: string) => void;
-  onCiteSourcesChange: (value: boolean) => void;
-  onConfidenceScoresChange: (value: boolean) => void;
-  onSystemPromptEnabledChange: (value: boolean) => void;
-  onSystemPromptChange: (value: string) => void;
   onWebhooksOpenChange: (open: boolean) => void;
   onWebhookUrlChange: (value: string) => void;
   onWebhookEventsChange: (value: string) => void;
@@ -1462,50 +1596,195 @@ function ExtractTierPanel({
 
           {advancedOpen ? (
             <div className="space-y-6 pt-4">
-              <div className="space-y-2">
-                <Label className="text-base font-semibold">Target</Label>
-                <p className="text-sm text-muted-foreground">
-                  How to group extracted data from your documents. <span className="font-medium text-primary">Learn more</span>
-                </p>
-                <Select value={targetMode} onValueChange={onTargetModeChange}>
-                  <SelectTrigger className="h-12 text-base">
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="per_document">Per Document</SelectItem>
-                    <SelectItem value="per_page">Per Page</SelectItem>
-                    <SelectItem value="per_section">Per Section</SelectItem>
-                  </SelectContent>
-                </Select>
+              {/* MODEL SETTINGS CARD */}
+              <div className="rounded-lg border border-border/70 bg-card p-4 space-y-4 shadow-sm">
+                <h4 className="text-base font-bold text-foreground">Model settings</h4>
+                
+                <div className="space-y-2">
+                  <Label className="text-sm font-semibold">Model tier</Label>
+                  <Select value={modelTier} onValueChange={onModelTierChange}>
+                    <SelectTrigger className="h-10 text-sm">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="cost_effective">Cost Effective (Gemini 2.5 Flash)</SelectItem>
+                      <SelectItem value="speed">Speed (GPT-4o Mini)</SelectItem>
+                      <SelectItem value="balanced">Balanced (GPT-4o)</SelectItem>
+                      <SelectItem value="quality">Quality (Gemini 2.5 Pro)</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
+
+                <div className="grid grid-cols-2 gap-4">
+                  <div className="space-y-2">
+                    <Label className="text-sm font-semibold">Temperature</Label>
+                    <Input
+                      type="number"
+                      min={0.0}
+                      max={1.0}
+                      step={0.1}
+                      value={temperature}
+                      onChange={(e) => onTemperatureChange(parseFloat(e.target.value) || 0.0)}
+                      className="h-10 text-sm"
+                    />
+                  </div>
+                  <div className="space-y-2">
+                    <Label className="text-sm font-semibold">Max tokens</Label>
+                    <Input
+                      type="number"
+                      value={maxTokens}
+                      onChange={(e) => onMaxTokensChange(parseInt(e.target.value) || 0)}
+                      className="h-10 text-sm"
+                    />
+                  </div>
+                </div>
               </div>
 
-              <div className="space-y-2">
-                <Label className="text-base font-semibold">Parse tier</Label>
-                <Select value={parseTier} onValueChange={onParseTierChange}>
-                  <SelectTrigger className="h-12 text-base">
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="cost_effective">Cost effective · 5 credits/page</SelectItem>
-                    <SelectItem value="agentic">Agentic · 10 credits/page</SelectItem>
-                  </SelectContent>
-                </Select>
+              {/* RETRIEVAL SETTINGS CARD */}
+              <div className="rounded-lg border border-border/70 bg-card p-4 space-y-4 shadow-sm">
+                <h4 className="text-base font-bold text-foreground">Retrieval settings</h4>
+                
+                <div className="grid grid-cols-3 gap-4">
+                  <div className="space-y-2">
+                    <Label className="text-xs font-semibold">Dense candidates</Label>
+                    <Input
+                      type="number"
+                      value={denseCandidateLimit}
+                      onChange={(e) => onDenseCandidateLimitChange(parseInt(e.target.value) || 0)}
+                      className="h-10 text-sm"
+                    />
+                  </div>
+                  <div className="space-y-2">
+                    <Label className="text-xs font-semibold">Sparse candidates</Label>
+                    <Input
+                      type="number"
+                      value={sparseCandidateLimit}
+                      onChange={(e) => onSparseCandidateLimitChange(parseInt(e.target.value) || 0)}
+                      className="h-10 text-sm"
+                    />
+                  </div>
+                  <div className="space-y-2">
+                    <Label className="text-xs font-semibold">Fusion constant</Label>
+                    <Input
+                      type="number"
+                      value={rankFusionConstant}
+                      onChange={(e) => onRankFusionConstantChange(parseInt(e.target.value) || 0)}
+                      className="h-10 text-sm"
+                    />
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-2 gap-4">
+                  <div className="space-y-2">
+                    <Label className="text-sm font-semibold">Scalar chunk limit</Label>
+                    <Input
+                      type="number"
+                      value={scalarChunkLimit}
+                      onChange={(e) => onScalarChunkLimitChange(parseInt(e.target.value) || 0)}
+                      className="h-10 text-sm"
+                    />
+                  </div>
+                  <div className="space-y-2">
+                    <Label className="text-sm font-semibold">Narrative chunk limit</Label>
+                    <Input
+                      type="number"
+                      value={narrativeChunkLimit}
+                      onChange={(e) => onNarrativeChunkLimitChange(parseInt(e.target.value) || 0)}
+                      className="h-10 text-sm"
+                    />
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-2 gap-4">
+                  <div className="space-y-2">
+                    <Label className="text-sm font-semibold">Max chunk limit</Label>
+                    <Input
+                      type="number"
+                      value={maxChunkLimit}
+                      onChange={(e) => onMaxChunkLimitChange(parseInt(e.target.value) || 0)}
+                      className="h-10 text-sm"
+                    />
+                  </div>
+                  <div className="space-y-2">
+                    <Label className="text-sm font-semibold">Retry expansion</Label>
+                    <Input
+                      type="number"
+                      value={retryChunkExpansion}
+                      onChange={(e) => onRetryChunkExpansionChange(parseInt(e.target.value) || 0)}
+                      className="h-10 text-sm"
+                    />
+                  </div>
+                </div>
               </div>
 
-              <div className="grid gap-4">
-                <ToggleRow label="Cite sources" checked={citeSources} onCheckedChange={onCiteSourcesChange} />
-                <ToggleRow label="Confidence scores" checked={confidenceScores} onCheckedChange={onConfidenceScoresChange} />
-                <ToggleRow label="System prompt" checked={systemPromptEnabled} onCheckedChange={onSystemPromptEnabledChange} />
+              {/* QUERIES SETTINGS CARD */}
+              <div className="rounded-lg border border-border/70 bg-card p-4 space-y-4 shadow-sm">
+                <h4 className="text-base font-bold text-foreground">Queries settings</h4>
+                
+                <div className="grid grid-cols-3 gap-4">
+                  <div className="space-y-2">
+                    <Label className="text-xs font-semibold">Max empty retries</Label>
+                    <Input
+                      type="number"
+                      value={emptyResultsMaxRetry}
+                      onChange={(e) => onEmptyResultsMaxRetryChange(parseInt(e.target.value) || 0)}
+                      className="h-10 text-sm"
+                    />
+                  </div>
+                  <div className="space-y-2">
+                    <Label className="text-xs font-semibold">Min query words</Label>
+                    <Input
+                      type="number"
+                      value={queryMinWords}
+                      onChange={(e) => onQueryMinWordsChange(parseInt(e.target.value) || 0)}
+                      className="h-10 text-sm"
+                    />
+                  </div>
+                  <div className="space-y-2">
+                    <Label className="text-xs font-semibold">Max query words</Label>
+                    <Input
+                      type="number"
+                      value={queryMaxWords}
+                      onChange={(e) => onQueryMaxWordsChange(parseInt(e.target.value) || 0)}
+                      className="h-10 text-sm"
+                    />
+                  </div>
+                </div>
+
+                <div className="pt-2">
+                  <ToggleRow
+                    label="Prior result preview"
+                    checked={priorResultPreview}
+                    onCheckedChange={onPriorResultPreviewChange}
+                  />
+                </div>
               </div>
 
-              {systemPromptEnabled ? (
-                <Textarea
-                  value={systemPrompt}
-                  onChange={(event) => onSystemPromptChange(event.target.value)}
-                  placeholder="Add system-level extraction guidance"
-                  className="min-h-24"
-                />
-              ) : null}
+              {/* COSTS AND LIMITS CARD */}
+              <div className="rounded-lg border border-border/70 bg-card p-4 space-y-4 shadow-sm">
+                <h4 className="text-base font-bold text-foreground">Cost limits</h4>
+                
+                <div className="grid grid-cols-2 gap-4">
+                  <div className="space-y-2">
+                    <Label className="text-sm font-semibold">Max page cost (credits)</Label>
+                    <Input
+                      type="number"
+                      value={maxPageCost}
+                      onChange={(e) => onMaxPageCostChange(parseInt(e.target.value) || 0)}
+                      className="h-10 text-sm"
+                    />
+                  </div>
+                  <div className="space-y-2">
+                    <Label className="text-sm font-semibold">Max job cost (credits)</Label>
+                    <Input
+                      type="number"
+                      value={maxJobCost}
+                      onChange={(e) => onMaxJobCostChange(parseInt(e.target.value) || 0)}
+                      className="h-10 text-sm"
+                    />
+                  </div>
+                </div>
+              </div>
             </div>
           ) : null}
         </div>
